@@ -1,0 +1,23 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# C++ build output. Object files are architecture-specific: an x86 .o checked
+# out on the Pi will either be relinked (fine) or, if its timestamp looks
+# current, fed straight to the ARM linker, which fails with "file in wrong
+# format". Never track them.
+Code/Cpp/*.o
+Code/Cpp/**/*.o
+Code/Cpp/*.d
+Code/Cpp/**/*.d
+Code/Cpp/hexapod_trace
+Code/Cpp/hexapod_unit
+Code/Cpp/hexapod_walk
+Code/Cpp/*.exe
+
+# Generated test traces: rebuilt by `make test` on whichever machine runs it,
+# and they must be regenerated per-platform rather than carried between them.
+Code/Cpp/test/*.trace
+
+# Runtime config written by parameter.py
+Code/Server/params.json
