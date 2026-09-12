@@ -1,0 +1,50 @@
+# Differential-test scenarios, executed in order against one Control instance.
+# State carries across lines on purpose: move_position mutates body_height and
+# body_points[i][2], so later gaits must see the mutated stance.
+#
+#   gait     <gait> <x> <y> <speed> <angle>    -> Control.run_gait
+#   position <x> <y> <z>                       -> Control.move_position
+#   attitude <roll> <pitch> <yaw>              -> calculate_posture_balance + apply
+#   calibrate                                  -> Control.calibrate + set_leg_angles
+
+# --- tripod gait, the common cases -------------------------------------
+gait 1 0 35 10 0
+gait 1 0 -35 10 0
+gait 1 35 0 10 0
+gait 1 -35 0 10 0
+
+# slowest speed -> F = 126 frames, the long path
+gait 1 0 35 2 0
+
+# pure rotation, and translation+rotation together
+gait 1 0 0 10 10
+gait 1 20 20 6 -10
+
+# the early-return branch: x == y == angle == 0
+gait 1 0 0 10 0
+
+# clamping: inputs beyond +/-35 must saturate
+gait 1 80 -80 10 0
+
+# --- wave gait ---------------------------------------------------------
+gait 2 0 35 10 0
+gait 2 35 0 5 10
+gait 2 0 0 10 0
+
+# --- body pose, which mutates persistent state -------------------------
+position 10 -10 5
+position -20 15 -12
+
+# gaits again, now on top of the mutated body_height
+gait 1 0 35 10 0
+gait 2 0 -35 8 0
+
+attitude 10 -5 12
+attitude -15 15 0
+
+# --- out-of-reach: must hit the "out of active range" branch and write nothing
+position 200 200 0
+
+# recover, then re-verify the calibration path
+calibrate
+gait 1 0 35 10 0

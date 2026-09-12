@@ -1,0 +1,291 @@
+// Drive the hexapod: open the I2C bus, power the servos, walk, park.
+//
+// Linux only. Build on the robot with `make robot`.
+
+#include "hexapod/control.hpp"
+#include "hexapod/paced_bus.hpp"
+#include "hexapod/pca9685_bus.hpp"
+#include "hexapod/servo_power.hpp"
+
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <string>
+
+namespace {
+
+volatile sig_atomic_t g_stop = 0;
+
+void on_signal(int)
+{
+    g_stop = 1;
+}
+
+// Counts frames without touching hardware, for --dry-run.
+class NullBus final : public hexapod::ServoBus {
+public:
+    void set_angle(int, int) override { ++writes_; }
+    void commit() override { ++frames_; }
+    void on_unreachable() override { ++skips_; }
+
+    long writes() const { return writes_; }
+    long frames() const { return frames_; }
+    long skips() const { return skips_; }
+
+private:
+    long writes_{0};
+    long frames_{0};
+    long skips_{0};
+};
+
+struct Options {
+    int gait{1};
+    int x{0};
+    int y{35};
+    int speed{10};
+    int angle{0};
+    int cycles{3};
+    long period_ms{30};
+    long arm_delay_ms{3000};
+    std::string device{"/dev/i2c-1"};
+    std::string points{"../Server/point.txt"};
+    bool dry_run{false};
+    bool keep_powered{false};
+    bool no_servo_power{false};
+};
+
+void usage()
+{
+    std::printf(
+        "usage: hexapod_walk [options]\n"
+        "\n"
+        "  --gait N          1 = tripod, 2 = wave            (default 1)\n"
+        "  --x N             sideways travel per cycle, mm, -35..35  (default 0)\n"
+        "  --y N             forward travel per cycle, mm, -35..35   (default 35)\n"
+        "  --speed N         2..10; higher means fewer, larger frames (default 10)\n"
+        "  --angle N         yaw per cycle, degrees          (default 0)\n"
+        "  --cycles N        gait cycles to run              (default 3)\n"
+        "  --period-ms N     frame period                    (default 30)\n"
+        "  --arm-delay-ms N  pause before the first servo command (default 3000)\n"
+        "  --i2c PATH        I2C device                      (default /dev/i2c-1)\n"
+        "  --points PATH     calibration file                (default ../Server/point.txt)\n"
+        "  --dry-run         run the gait maths and pacing, touch no hardware\n"
+        "  --no-servo-power  drive I2C for real, but never energise the servo\n"
+        "                    rail: bench-test the full driver without motion\n"
+        "  --keep-powered    leave the servo rail on at exit\n"
+        "\n"
+        "The default 30 ms period is roughly the original Python's effective frame\n"
+        "rate (~21 ms of I2C plus its 10 ms sleep). Lowering it walks FASTER,\n"
+        "because the stride per cycle is fixed -- the servos have to keep up.\n");
+}
+
+bool parse_long(const char* text, long* out)
+{
+    char* end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0') {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+bool parse_options(int argc, char** argv, Options* options)
+{
+    for (int i = 1; i < argc; ++i) {
+        const std::string flag = argv[i];
+        const bool has_value = (i + 1) < argc;
+
+        auto take_long = [&](long* target) {
+            if (!has_value || !parse_long(argv[i + 1], target)) {
+                std::fprintf(stderr, "%s needs a number\n", flag.c_str());
+                return false;
+            }
+            ++i;
+            return true;
+        };
+        auto take_int = [&](int* target) {
+            long value = 0;
+            if (!take_long(&value)) {
+                return false;
+            }
+            *target = static_cast<int>(value);
+            return true;
+        };
+
+        if (flag == "--help" || flag == "-h") {
+            usage();
+            std::exit(0);
+        } else if (flag == "--gait") {
+            if (!take_int(&options->gait)) return false;
+        } else if (flag == "--x") {
+            if (!take_int(&options->x)) return false;
+        } else if (flag == "--y") {
+            if (!take_int(&options->y)) return false;
+        } else if (flag == "--speed") {
+            if (!take_int(&options->speed)) return false;
+        } else if (flag == "--angle") {
+            if (!take_int(&options->angle)) return false;
+        } else if (flag == "--cycles") {
+            if (!take_int(&options->cycles)) return false;
+        } else if (flag == "--period-ms") {
+            if (!take_long(&options->period_ms)) return false;
+        } else if (flag == "--arm-delay-ms") {
+            if (!take_long(&options->arm_delay_ms)) return false;
+        } else if (flag == "--i2c") {
+            if (!has_value) {
+                std::fprintf(stderr, "--i2c needs a path\n");
+                return false;
+            }
+            options->device = argv[++i];
+        } else if (flag == "--points") {
+            if (!has_value) {
+                std::fprintf(stderr, "--points needs a path\n");
+                return false;
+            }
+            options->points = argv[++i];
+        } else if (flag == "--dry-run") {
+            options->dry_run = true;
+        } else if (flag == "--no-servo-power") {
+            options->no_servo_power = true;
+        } else if (flag == "--keep-powered") {
+            options->keep_powered = true;
+        } else {
+            std::fprintf(stderr, "unknown option: %s\n", flag.c_str());
+            usage();
+            return false;
+        }
+    }
+    return true;
+}
+
+void sleep_ms(long milliseconds)
+{
+    if (milliseconds <= 0) {
+        return;
+    }
+    timespec request;
+    request.tv_sec = milliseconds / 1000;
+    request.tv_nsec = (milliseconds % 1000) * 1000000L;
+    nanosleep(&request, nullptr);
+}
+
+}  // namespace
+
+int main(int argc, char** argv)
+{
+    Options options;
+    if (!parse_options(argc, argv, &options)) {
+        return 2;
+    }
+
+    hexapod::FootPositions calibration{};
+    std::string error;
+    if (!hexapod::read_calibration_file(options.points, &calibration, &error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+    }
+
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    NullBus null_bus;
+    hexapod::Pca9685Bus i2c_bus;
+    hexapod::ServoPower power;
+
+    hexapod::ServoBus* inner = &null_bus;
+
+    if (!options.dry_run) {
+        if (!i2c_bus.open(options.device, &error)) {
+            std::fprintf(stderr, "i2c: %s\n", error.c_str());
+            return 1;
+        }
+        inner = &i2c_bus;
+
+        if (options.no_servo_power) {
+            // Every register write still goes out on the wire; only the rail
+            // stays dead. This is the mode for validating the driver on a
+            // bench, and for a first run with the batteries in.
+            std::printf("servo rail left unpowered (--no-servo-power)\n");
+        } else if (!power.open(&error) || !power.enable(&error)) {
+            std::fprintf(stderr, "servo power: %s\n", error.c_str());
+            return 1;
+        } else {
+            std::printf("servo power enabled via %s line %u\n",
+                        power.chip_path().c_str(), hexapod::ServoPower::kDefaultLine);
+        }
+    }
+
+    hexapod::PacedBus bus(*inner, options.period_ms * 1000);
+
+    // Constructing Control calibrates and immediately drives all 18 joints to
+    // the stance pose, from wherever the legs currently are. That is a fast,
+    // full-authority move -- the same one the Python makes on startup.
+    // Only a warning worth making when something can actually move: with the
+    // rail unpowered the same writes go out and the legs stay put.
+    const bool can_move = !options.dry_run && !options.no_servo_power;
+    if (can_move && options.arm_delay_ms > 0) {
+        std::printf("about to move ALL 18 servos to the stance pose in %ld ms.\n",
+                    options.arm_delay_ms);
+        std::printf("support the body now, or Ctrl-C to abort.\n");
+        std::fflush(stdout);
+        sleep_ms(options.arm_delay_ms);
+        if (g_stop) {
+            std::printf("aborted before arming\n");
+            if (power.is_open() && !options.keep_powered) {
+                power.disable();
+            }
+            return 0;
+        }
+    }
+
+    bus.reset();
+    hexapod::Control control(bus, calibration);
+
+    hexapod::GaitCommand command;
+    command.gait = options.gait;
+    command.x = options.x;
+    command.y = options.y;
+    command.speed = options.speed;
+    command.angle = options.angle;
+
+    std::printf("gait %d  x %d  y %d  speed %d  angle %d  cycles %d  period %ld ms\n",
+                command.gait, command.x, command.y, command.speed, command.angle,
+                options.cycles, options.period_ms);
+
+    int completed = 0;
+    for (int cycle = 0; cycle < options.cycles && !g_stop; ++cycle) {
+        control.run_gait(command);
+        ++completed;
+    }
+
+    if (g_stop) {
+        std::printf("\ninterrupted after %d of %d cycles\n", completed, options.cycles);
+    }
+
+    std::printf("frames %ld  overruns %ld  worst overrun %ld us\n",
+                bus.frames(), bus.overruns(), bus.worst_overrun_us());
+
+    if (options.dry_run) {
+        std::printf("dry run: %ld servo writes, %ld frames, %ld unreachable\n",
+                    null_bus.writes(), null_bus.frames(), null_bus.skips());
+        return 0;
+    }
+
+    std::printf("i2c transactions %ld over %ld frames (%.1f per frame)\n",
+                i2c_bus.transactions(), i2c_bus.frames(),
+                i2c_bus.frames() > 0
+                    ? static_cast<double>(i2c_bus.transactions()) / i2c_bus.frames()
+                    : 0.0);
+
+    // Park the legs before cutting power, so the robot relaxes rather than
+    // dropping under its own weight with the outputs still asserted.
+    i2c_bus.relax();
+    if (power.is_open() && !options.keep_powered) {
+        power.disable();
+        std::printf("servo power disabled\n");
+    }
+    return 0;
+}
