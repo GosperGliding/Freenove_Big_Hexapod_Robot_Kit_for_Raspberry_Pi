@@ -48,7 +48,7 @@ struct Options {
     int speed{10};
     int angle{0};
     int cycles{3};
-    int height{20};
+    int height{40};
     long period_ms{30};
     long arm_delay_ms{3000};
     std::string device{"/dev/i2c-1"};
@@ -69,7 +69,7 @@ void usage()
         "  --speed N         2..10; higher means fewer, larger frames (default 10)\n"
         "  --angle N         yaw per cycle, degrees          (default 0)\n"
         "  --cycles N        gait cycles to run              (default 3)\n"
-        "  --height N        ride height, -20..20; higher stands taller (default 20)\n"
+        "  --height N        ride height, -20..80; higher stands taller (default 40)\n"
         "  --period-ms N     frame period                    (default 30)\n"
         "  --arm-delay-ms N  pause before the first servo command (default 3000)\n"
         "  --i2c PATH        I2C device                      (default /dev/i2c-1)\n"
@@ -278,18 +278,35 @@ int main(int argc, char** argv)
     // body_height defaults to -25 mm, which leaves the chassis on the ground:
     // the gait runs, the legs cycle, and the robot drags itself rather than
     // stepping. move_position sets body_height to -30 - height, so a larger
-    // height stands taller; 20 is the limit and gives -50 mm, a 25 mm lift.
+    // height stands taller.
+    //
+    // The original protocol clamps this to +/-20, but that is a limit of the
+    // client, not of the legs. Measured against the worst case the gait can
+    // produce -- a full diagonal stride, x and y both saturated -- peak leg
+    // reach runs 196 mm at height 20, 204 at 40, 214 at 60 and 224 at 80,
+    // against a physical maximum of 233 mm (33 + 90 + 110). Past 80 the legs
+    // run out of reach mid-stride and the IK silently clamps.
+    //
+    // Note the reach limit is not the practical one: at height 80 the leg is
+    // 96% extended, where it has almost no mechanical advantage left and the
+    // servos struggle to hold the body up at all.
     //
     // Ramped one millimetre per call rather than applied in one go, because
-    // move_position drives straight to the new pose -- a 25 mm jump across all
+    // move_position drives straight to the new pose -- a large jump across all
     // 18 joints at once is a violent move. Each step is one frame, so PacedBus
     // times the ascent for free.
+    constexpr int kMaxHeight = 80;
+    constexpr int kTallHeight = 60;  // above this, stride margin gets thin
     int height = options.height;
-    if (height > 20) {
-        height = 20;
+    if (height > kMaxHeight) {
+        height = kMaxHeight;
     }
     if (height < -20) {
         height = -20;
+    }
+    if (height > kTallHeight) {
+        std::printf("note: ride height %d leaves under 20 mm of leg reach at full "
+                    "stride, and little torque to hold the body up.\n", height);
     }
     std::printf("standing up: ride height %d (body %d mm)\n", height, -30 - height);
     const int rise = (height >= 0) ? 1 : -1;

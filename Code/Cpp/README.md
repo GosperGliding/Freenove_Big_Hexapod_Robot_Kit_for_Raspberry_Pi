@@ -34,6 +34,7 @@ sudo ./hexapod_walk             # 3 tripod cycles forward
 --gait 2            wave gait instead of tripod
 --y -35             walk backwards
 --angle 10          turn while walking
+--height 60         stand taller; -20..80, default 40
 --period-ms 20      faster frames -- see the warning below
 --cycles 10
 --arm-delay-ms 0    skip the pre-arm pause
@@ -67,6 +68,27 @@ except the servos moving, since their V+ rail is dead.
 
 `--no-servo-power` is also the right way to make the *first* run with batteries
 fitted: identical I2C traffic, rail never energised, nothing moves.
+
+### Ride height
+
+`body_height` defaults to -25 mm, which leaves the chassis on the ground -- the
+gait runs correctly and the robot drags itself instead of stepping.
+`--height N` sets it to `-30 - N` and ramps there a millimetre per frame.
+
+The original protocol clamps this to +/-20, but that is a limit of the client,
+not of the legs. Peak leg reach against the worst case the gait can produce (a
+full diagonal stride, x and y both saturated):
+
+| `--height` | body height | peak reach | margin to 233 mm |
+|---|---|---|---|
+| 20 | -50 mm | 196 mm | 37 mm |
+| 40 (default) | -70 mm | 204 mm | 29 mm |
+| 60 | -90 mm | 214 mm | 20 mm |
+| 80 (max) | -110 mm | 224 mm | 9 mm |
+
+Past 80 the legs run out of reach mid-stride and the IK clamps silently. The
+reach limit is not the practical one though: at 80 the leg is 96% extended,
+with almost no mechanical advantage left to hold the body up.
 
 ### Silent failures the tool now reports
 
