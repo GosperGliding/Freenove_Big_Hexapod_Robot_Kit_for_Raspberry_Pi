@@ -10,6 +10,7 @@
 #include "hexapod/pca9685_bus.hpp"
 #include "hexapod/servo_power.hpp"
 
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -496,7 +497,13 @@ int main(int argc, char** argv)
 
     // Sit down before cutting power. relax() disables the outputs, so from a
     // standing pose the robot would simply drop; lowering first lets it settle.
-    for (int z = height; z >= -20; --z) {
+    //
+    // Start from where the robot actually is, not from the --height option: a
+    // staged dance changes ride height as it runs and may already have
+    // finished on the floor, and stepping from the option value would stand it
+    // back up first.
+    for (int z = static_cast<int>(std::lround(-30.0 - control.body_height()));
+         z >= -20; --z) {
         control.move_position(0, 0, z);
     }
 

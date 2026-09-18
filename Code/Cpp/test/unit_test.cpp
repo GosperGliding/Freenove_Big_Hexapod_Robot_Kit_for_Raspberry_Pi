@@ -233,13 +233,16 @@ void test_gait_patterns_stay_in_reach()
 void test_dance_routines_stay_in_reach()
 {
     for (int height : {0, 40, 80}) {
-        CountingBus bus;
-        hexapod::Control control(bus, nominal_calibration());
-        raise_to(control, height);
-
         for (int i = 0; i < hexapod::dance::routine_count(); ++i) {
-            const hexapod::dance::Routine& routine = hexapod::dance::routines()[i];
+            // A fresh Control per routine: the staged routines change ride
+            // height as they run and can finish on the floor, so reusing one
+            // would silently test later routines from the wrong stance.
+            CountingBus bus;
+            hexapod::Control control(bus, nominal_calibration());
+            raise_to(control, height);
             bus.reset();
+
+            const hexapod::dance::Routine& routine = hexapod::dance::routines()[i];
             const bool ok = hexapod::dance::perform(control, routine.name, 60, 1);
             expect_true(ok, "dance routine runs");
             if (bus.unreachable() != 0) {

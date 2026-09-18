@@ -97,10 +97,23 @@ instead of the original jump to full height on the first frame.
 | `bob` | rises and dips on the spot |
 | `pushup` | dips deep and presses back up |
 | `wave` | plants five legs and waves the sixth |
-| `twerk` | rear-biased double-time bounce with a hip sway |
+| `bounce` | rear-biased double-time bounce with a hip sway |
+| `moonwalk` | glides backwards with the feet skimming the floor |
+| `twerk` | staged: rise circling, half turn, bounce, sink circling |
 
-All but `wave` keep six feet planted, so the support polygon never changes and
-they hold at amplitudes a gait could not.
+`sway` through `bounce` keep six feet planted, so the support polygon never
+changes and they hold at amplitudes a gait could not.
+
+**`twerk`** is a four-phase routine rather than one repeating beat, about 20
+seconds at the defaults: spirals up to ride height 60 over two circles, turns
+180 degrees on the ripple pattern, bounces with a harder front-to-back
+differential and a slow circle laid over it, then spirals down to the floor.
+`--cycles` sets the length of the bounce phase only.
+
+**`moonwalk`** is an honest approximation. The real illusion needs one foot
+sliding while another takes weight, and six legs in a wave never give that
+moment. What survives is what the eye actually reads: feet skimming 7 mm
+instead of stepping, and a forward lean against the direction of travel.
 
 `test/unit_test.cpp` runs every pattern at worst-case stride and every routine,
 at ride heights 0, 40 and 80, and asserts Control never rejects a frame as
