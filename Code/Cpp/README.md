@@ -34,6 +34,7 @@ sudo ./hexapod_walk             # 3 tripod cycles forward
 --gait 2            wave gait instead of tripod
 --y -35             walk backwards
 --angle 10          turn while walking
+--straighten        hold the assembly reference pose and wait
 --height 60         stand taller; -20..80, default 40
 --period-ms 20      faster frames -- see the warning below
 --cycles 10
@@ -68,6 +69,24 @@ except the servos moving, since their V+ rail is dead.
 
 `--no-servo-power` is also the right way to make the *first* run with batteries
 fitted: identical I2C traffic, rail never energised, nothing moves.
+
+### Straightening the legs
+
+```bash
+sudo ./hexapod_walk --straighten
+```
+
+Holds all 32 channels at the angles `servo.py` uses while horns are fitted --
+90 degrees, except 10/13/31 at 10 and 18/21/27 at 170 -- and waits for Ctrl-C.
+
+These are raw channel angles, deliberately bypassing Control: no IK, no
+`point.txt` calibration. That is the point. Nothing in this robot reads a joint
+position back, so this pose IS the reference the whole kinematic chain is
+measured against. A leg fitted one spline tooth off is permanently wrong by
+that tooth, and no amount of calibration downstream can see it.
+
+Fix the mechanics here first, then calibrate, then tune ride height -- in that
+order. Each step assumes the one before it.
 
 ### Ride height
 

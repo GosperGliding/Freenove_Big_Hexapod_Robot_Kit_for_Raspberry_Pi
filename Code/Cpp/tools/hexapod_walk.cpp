@@ -56,7 +56,24 @@ struct Options {
     bool dry_run{false};
     bool keep_powered{false};
     bool no_servo_power{false};
+    bool straighten{false};
 };
+
+// The angles servo.py holds every channel at while horns and legs are fitted.
+// This is the mechanical zero the whole kinematic chain is referenced to: a
+// leg attached one spline tooth away from here is permanently wrong by that
+// tooth, and nothing downstream can detect it, because no joint position is
+// ever read back.
+int install_angle(int channel)
+{
+    if (channel == 10 || channel == 13 || channel == 31) {
+        return 10;
+    }
+    if (channel == 18 || channel == 21 || channel == 27) {
+        return 170;
+    }
+    return 90;
+}
 
 void usage()
 {
@@ -74,6 +91,8 @@ void usage()
         "  --arm-delay-ms N  pause before the first servo command (default 3000)\n"
         "  --i2c PATH        I2C device                      (default /dev/i2c-1)\n"
         "  --points PATH     calibration file                (default ../Server/point.txt)\n"
+        "  --straighten      hold every servo at its assembly reference angle\n"
+        "                    and wait, for checking or refitting the legs\n"
         "  --dry-run         run the gait maths and pacing, touch no hardware\n"
         "  --no-servo-power  drive I2C for real, but never energise the servo\n"
         "                    rail: bench-test the full driver without motion\n"
@@ -151,6 +170,8 @@ bool parse_options(int argc, char** argv, Options* options)
                 return false;
             }
             options->points = argv[++i];
+        } else if (flag == "--straighten") {
+            options->straighten = true;
         } else if (flag == "--dry-run") {
             options->dry_run = true;
         } else if (flag == "--no-servo-power") {
@@ -268,6 +289,36 @@ int main(int argc, char** argv)
             }
             return 0;
         }
+    }
+
+    if (options.straighten) {
+        // Bypass Control entirely. These are raw channel angles, not a pose
+        // derived from IK, so what you see is the servos' own reference
+        // unfiltered by kinematics or by point.txt calibration -- which is the
+        // point: it is the thing the rest of the chain is measured against.
+        //
+        // Written through `inner` rather than the paced bus because a static
+        // pose has no frames to pace.
+        std::printf("holding all 32 channels at their assembly reference angles\n");
+        for (int channel = 0; channel < 32; ++channel) {
+            inner->set_angle(channel, install_angle(channel));
+        }
+        inner->commit();
+
+        std::printf("check each leg; refit any horn that sits off. Ctrl-C when done.\n");
+        while (g_stop == 0) {
+            sleep_ms(100);
+        }
+        std::printf("\n");
+
+        if (!options.dry_run) {
+            i2c_bus.relax();
+            if (power.is_open() && !options.keep_powered) {
+                power.disable();
+                std::printf("servo power disabled\n");
+            }
+        }
+        return 0;
     }
 
     bus.reset();
