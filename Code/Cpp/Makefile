@@ -32,7 +32,7 @@ endif
 CXXFLAGS += -MMD -MP
 
 # Portable: pure computation, builds and runs anywhere.
-LIB_SRC  := src/kinematics.cpp src/control.cpp src/pwm_encoding.cpp
+LIB_SRC  := src/kinematics.cpp src/control.cpp src/pwm_encoding.cpp src/gait.cpp src/dance.cpp
 TOOL_SRC := tools/trace_main.cpp
 UNIT_SRC := test/unit_test.cpp
 

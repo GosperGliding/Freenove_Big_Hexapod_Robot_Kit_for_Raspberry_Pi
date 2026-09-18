@@ -72,6 +72,12 @@ public:
 
     const LegAngles& current_angles() const { return current_angles_; }
     const FootPositions& leg_positions() const { return leg_positions_; }
+
+    // The neutral stance in body frame. Choreography built on top of this
+    // class works relative to it, so it follows whatever ride height
+    // move_position last set.
+    const FootPositions& body_points() const { return body_points_; }
+
     double body_height() const { return body_height_; }
 
     static const std::array<LegMount, kLegCount>& mounts();

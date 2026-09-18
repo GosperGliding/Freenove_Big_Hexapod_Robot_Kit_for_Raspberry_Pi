@@ -7,8 +7,11 @@
 // checked on a development machine rather than on the robot.
 
 #include "hexapod/control.hpp"
+#include "hexapod/dance.hpp"
+#include "hexapod/gait.hpp"
 #include "hexapod/pwm_encoding.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -166,6 +169,123 @@ void test_channel_map_masks()
     expect_eq(bits, 18, "exactly 18 distinct servo channels are driven");
 }
 
+// Counts the frames Control rejected as outside the reach envelope. Every
+// gait and dance must produce none, at any supported ride height.
+class CountingBus final : public hexapod::ServoBus {
+public:
+    void set_angle(int, int) override {}
+    void commit() override { ++frames_; }
+    void on_unreachable() override { ++unreachable_; }
+
+    void reset() { frames_ = 0; unreachable_ = 0; }
+    long frames() const { return frames_; }
+    long unreachable() const { return unreachable_; }
+
+private:
+    long frames_{0};
+    long unreachable_{0};
+};
+
+hexapod::FootPositions nominal_calibration()
+{
+    hexapod::FootPositions points{};
+    for (int i = 0; i < hexapod::kLegCount; ++i) {
+        points[i] = hexapod::Vec3{140.0, 0.0, 0.0};
+    }
+    return points;
+}
+
+void raise_to(hexapod::Control& control, int height)
+{
+    for (int z = 0; z <= height; ++z) {
+        control.move_position(0, 0, z);
+    }
+}
+
+// Worst case the gaits can be asked for: full diagonal stride plus rotation.
+void test_gait_patterns_stay_in_reach()
+{
+    for (int height : {0, 40, 80}) {
+        CountingBus bus;
+        hexapod::Control control(bus, nominal_calibration());
+        raise_to(control, height);
+
+        for (int i = 0; i < hexapod::gait::pattern_count(); ++i) {
+            const hexapod::gait::Pattern& pattern = hexapod::gait::patterns()[i];
+            hexapod::gait::Motion motion;
+            motion.x = 35.0;
+            motion.y = 35.0;
+            motion.yaw_deg = 10.0;
+
+            bus.reset();
+            hexapod::gait::walk(control, pattern, motion, 1, 60);
+
+            expect_eq(bus.frames(), 60, "gait produces one frame per step");
+            if (bus.unreachable() != 0) {
+                std::printf("  FAIL  gait %s at height %d: %ld unreachable frames\n",
+                            pattern.name, height, bus.unreachable());
+                ++failures;
+            }
+        }
+    }
+}
+
+void test_dance_routines_stay_in_reach()
+{
+    for (int height : {0, 40, 80}) {
+        CountingBus bus;
+        hexapod::Control control(bus, nominal_calibration());
+        raise_to(control, height);
+
+        for (int i = 0; i < hexapod::dance::routine_count(); ++i) {
+            const hexapod::dance::Routine& routine = hexapod::dance::routines()[i];
+            bus.reset();
+            const bool ok = hexapod::dance::perform(control, routine.name, 60, 1);
+            expect_true(ok, "dance routine runs");
+            if (bus.unreachable() != 0) {
+                std::printf("  FAIL  dance %s at height %d: %ld unreachable frames\n",
+                            routine.name, height, bus.unreachable());
+                ++failures;
+            }
+        }
+    }
+}
+
+// A foot in stance must track a straight line, and a foot in swing must leave
+// and meet the ground with no vertical step.
+void test_foot_trajectory()
+{
+    const hexapod::gait::Pattern* tripod = hexapod::gait::find_pattern("tripod");
+    expect_true(tripod != nullptr, "tripod pattern exists");
+    expect_true(hexapod::gait::find_pattern("ripple") != nullptr, "ripple pattern exists");
+    expect_true(hexapod::gait::find_pattern("wave") != nullptr, "wave pattern exists");
+    expect_true(hexapod::gait::find_pattern("nonsense") == nullptr, "unknown pattern rejected");
+
+    const hexapod::Vec3 travel{0.0, 30.0, 0.0};
+
+    // Start and end of the cycle must agree: the gait has to close.
+    const hexapod::Vec3 start =
+        hexapod::gait::foot_offset(*tripod, 0, 0.0, travel, 40.0);
+    const hexapod::Vec3 end =
+        hexapod::gait::foot_offset(*tripod, 0, 0.999999, travel, 40.0);
+    expect_true(std::fabs(start.y - end.y) < 0.01, "gait cycle closes in y");
+
+    // Lift is zero on the ground and at both ends of the swing, positive in
+    // between, and never exceeds the requested step height.
+    double peak = 0.0;
+    for (int i = 0; i <= 1000; ++i) {
+        const double phase = static_cast<double>(i) / 1000.0;
+        const hexapod::Vec3 p =
+            hexapod::gait::foot_offset(*tripod, 0, phase, travel, 40.0);
+        expect_true(p.z >= -1e-9, "lift is never negative");
+        expect_true(p.z <= 40.0 + 1e-9, "lift never exceeds step height");
+        if (p.z > peak) {
+            peak = p.z;
+        }
+    }
+    expect_true(peak > 39.0, "swing reaches close to full step height");
+}
+
 }  // namespace
 
 int main()
@@ -177,6 +297,9 @@ int main()
     test_register_bytes();
     test_dirty_runs();
     test_channel_map_masks();
+    test_foot_trajectory();
+    test_gait_patterns_stay_in_reach();
+    test_dance_routines_stay_in_reach();
 
     if (failures == 0) {
         std::printf("  PASS  all unit tests\n");

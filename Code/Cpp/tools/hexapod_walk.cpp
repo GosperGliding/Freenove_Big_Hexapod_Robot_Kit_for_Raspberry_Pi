@@ -4,6 +4,8 @@
 
 #include "hexapod/battery.hpp"
 #include "hexapod/control.hpp"
+#include "hexapod/dance.hpp"
+#include "hexapod/gait.hpp"
 #include "hexapod/paced_bus.hpp"
 #include "hexapod/pca9685_bus.hpp"
 #include "hexapod/servo_power.hpp"
@@ -57,6 +59,10 @@ struct Options {
     bool keep_powered{false};
     bool no_servo_power{false};
     bool straighten{false};
+    bool list{false};
+    int frames{60};
+    std::string pattern;
+    std::string routine;
 };
 
 // The angles servo.py holds every channel at while horns and legs are fitted.
@@ -80,7 +86,12 @@ void usage()
     std::printf(
         "usage: hexapod_walk [options]\n"
         "\n"
-        "  --gait N          1 = tripod, 2 = wave            (default 1)\n"
+        "  --pattern NAME    gait from the phase-based engine: tripod, ripple, wave\n"
+        "  --dance NAME      a routine instead of walking; --list to see them\n"
+        "  --frames N        frames per cycle for --pattern and --dance (default 60)\n"
+        "  --list            print the available patterns and dances, then exit\n"
+        "\n"
+        "  --gait N          original engine: 1 = tripod, 2 = wave  (default 1)\n"
         "  --x N             sideways travel per cycle, mm, -35..35  (default 0)\n"
         "  --y N             forward travel per cycle, mm, -35..35   (default 35)\n"
         "  --speed N         2..10; higher means fewer, larger frames (default 10)\n"
@@ -170,6 +181,22 @@ bool parse_options(int argc, char** argv, Options* options)
                 return false;
             }
             options->points = argv[++i];
+        } else if (flag == "--frames") {
+            if (!take_int(&options->frames)) return false;
+        } else if (flag == "--list") {
+            options->list = true;
+        } else if (flag == "--pattern") {
+            if (!has_value) {
+                std::fprintf(stderr, "--pattern needs a name\n");
+                return false;
+            }
+            options->pattern = argv[++i];
+        } else if (flag == "--dance") {
+            if (!has_value) {
+                std::fprintf(stderr, "--dance needs a name\n");
+                return false;
+            }
+            options->routine = argv[++i];
         } else if (flag == "--straighten") {
             options->straighten = true;
         } else if (flag == "--dry-run") {
@@ -204,6 +231,33 @@ int main(int argc, char** argv)
 {
     Options options;
     if (!parse_options(argc, argv, &options)) {
+        return 2;
+    }
+
+    if (options.list) {
+        std::printf("gait patterns (--pattern):\n");
+        for (int i = 0; i < hexapod::gait::pattern_count(); ++i) {
+            const hexapod::gait::Pattern& p = hexapod::gait::patterns()[i];
+            std::printf("  %-8s  %s\n", p.name, p.description);
+        }
+        std::printf("\ndances (--dance):\n");
+        for (int i = 0; i < hexapod::dance::routine_count(); ++i) {
+            const hexapod::dance::Routine& r = hexapod::dance::routines()[i];
+            std::printf("  %-8s  %s\n", r.name, r.description);
+        }
+        return 0;
+    }
+
+    // Reject unknown names before touching any hardware, rather than after
+    // the robot has already stood up.
+    if (!options.pattern.empty() &&
+        hexapod::gait::find_pattern(options.pattern.c_str()) == nullptr) {
+        std::fprintf(stderr, "unknown pattern: %s (try --list)\n", options.pattern.c_str());
+        return 2;
+    }
+    if (!options.routine.empty() &&
+        hexapod::dance::find_routine(options.routine.c_str()) == nullptr) {
+        std::fprintf(stderr, "unknown dance: %s (try --list)\n", options.routine.c_str());
         return 2;
     }
 
@@ -368,21 +422,51 @@ int main(int argc, char** argv)
         }
     }
 
-    hexapod::GaitCommand command;
-    command.gait = options.gait;
-    command.x = options.x;
-    command.y = options.y;
-    command.speed = options.speed;
-    command.angle = options.angle;
-
-    std::printf("gait %d  x %d  y %d  speed %d  angle %d  cycles %d  period %ld ms\n",
-                command.gait, command.x, command.y, command.speed, command.angle,
-                options.cycles, options.period_ms);
-
     int completed = 0;
-    for (int cycle = 0; cycle < options.cycles && !g_stop; ++cycle) {
-        control.run_gait(command);
-        ++completed;
+
+    if (!options.routine.empty()) {
+        std::printf("dance %s  repeats %d  frames %d  period %ld ms\n",
+                    options.routine.c_str(), options.cycles, options.frames,
+                    options.period_ms);
+        for (int beat = 0; beat < options.cycles && g_stop == 0; ++beat) {
+            hexapod::dance::perform(control, options.routine.c_str(), options.frames, 1);
+            ++completed;
+        }
+
+    } else if (!options.pattern.empty()) {
+        // The phase-based engine. Checked for a valid name before any hardware
+        // was touched, so this lookup cannot fail here.
+        const hexapod::gait::Pattern* pattern =
+            hexapod::gait::find_pattern(options.pattern.c_str());
+        hexapod::gait::Motion motion;
+        motion.x = options.x;
+        motion.y = options.y;
+        motion.yaw_deg = options.angle;
+
+        std::printf("pattern %s  x %d  y %d  yaw %d  cycles %d  frames %d  period %ld ms\n",
+                    pattern->name, options.x, options.y, options.angle,
+                    options.cycles, options.frames, options.period_ms);
+        for (int cycle = 0; cycle < options.cycles && g_stop == 0; ++cycle) {
+            hexapod::gait::walk(control, *pattern, motion, 1, options.frames);
+            ++completed;
+        }
+
+    } else {
+        // The original engine, byte-for-byte equivalent to the Python.
+        hexapod::GaitCommand command;
+        command.gait = options.gait;
+        command.x = options.x;
+        command.y = options.y;
+        command.speed = options.speed;
+        command.angle = options.angle;
+
+        std::printf("gait %d  x %d  y %d  speed %d  angle %d  cycles %d  period %ld ms\n",
+                    command.gait, command.x, command.y, command.speed, command.angle,
+                    options.cycles, options.period_ms);
+        for (int cycle = 0; cycle < options.cycles && g_stop == 0; ++cycle) {
+            control.run_gait(command);
+            ++completed;
+        }
     }
 
     if (g_stop) {
