@@ -1,0 +1,20 @@
+# Preventive, not corrective: the repo is already LF in the index and the
+# working tree. This pins that invariant so it does not depend on each
+# developer's core.autocrlf.
+#
+# The deployment target is Linux (Raspberry Pi). A CRLF Makefile or shell
+# script that reached the Pi would fail in ways that read as unrelated bugs,
+# so eol=lf is set for the working tree too: what is edited here is
+# byte-for-byte what the robot builds. No .bat/.cmd/.ps1 exist in this repo,
+# so nothing needs CRLF.
+#
+# Note that `text=auto` will NOT retrofit a file already committed with CRLF;
+# that would need a forced one-time pass. Nothing here needs one today.
+* text=auto eol=lf
+
+# text=auto already leaves detected binaries alone; these are explicit so a
+# misfiring heuristic cannot corrupt them.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.exe binary
