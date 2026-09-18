@@ -36,7 +36,7 @@ sudo ./hexapod_walk             # 3 tripod cycles forward
 --angle 10          turn while walking
 --list              show every gait pattern and dance
 --pattern ripple    phase-based gait engine: tripod, ripple, wave
---dance twerk       a routine instead of walking
+--dance twerk       a routine instead of walking; --list shows them all
 --frames 90         frames per cycle for --pattern and --dance (default 60)
 --straighten        hold the assembly reference pose and wait
 --height 60         stand taller; -20..80, default 40
@@ -97,18 +97,22 @@ instead of the original jump to full height on the first frame.
 | `bob` | rises and dips on the spot |
 | `pushup` | dips deep and presses back up |
 | `wave` | plants five legs and waves the sixth |
-| `bounce` | rear-biased double-time bounce with a hip sway |
+| `twerk` | rear-biased double-time bounce with a hip sway |
 | `moonwalk` | glides backwards with the feet skimming the floor |
-| `twerk` | staged: rise circling, half turn, bounce, sink circling |
+| `show` | staged: rise circling, half turn, twerk, sink circling |
 
-`sway` through `bounce` keep six feet planted, so the support polygon never
+`sway` through `twerk` keep six feet planted, so the support polygon never
 changes and they hold at amplitudes a gait could not.
 
-**`twerk`** is a four-phase routine rather than one repeating beat, about 20
+**`twerk`** dips 28 mm at the rear on a `{0, 0.5, 1, 1, 0.5, 0}` bias -- the
+front pair take none of it, so the body pitches about its front feet as a hinge
+rather than see-sawing about its centre. That differential does more for how
+the motion reads than the amplitude does.
+
+**`show`** is a four-phase routine rather than one repeating beat, about 20
 seconds at the defaults: spirals up to ride height 60 over two circles, turns
-180 degrees on the ripple pattern, bounces with a harder front-to-back
-differential and a slow circle laid over it, then spirals down to the floor.
-`--cycles` sets the length of the bounce phase only.
+180 degrees on the ripple pattern, twerks with a slow circle laid over it, then
+spirals down to the floor. `--cycles` sets the length of the twerk phase only.
 
 **`moonwalk`** is an honest approximation. The real illusion needs one foot
 sliding while another takes weight, and six legs in a wave never give that

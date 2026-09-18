@@ -16,9 +16,9 @@ const Routine kRoutines[] = {
     {"bob", "rise and dip on the spot"},
     {"pushup", "dip deep and press back up"},
     {"wave", "plant five legs and wave the sixth"},
-    {"bounce", "rear-biased double-time bounce with a hip sway"},
+    {"twerk", "rear-biased double-time bounce with a hip sway"},
     {"moonwalk", "glide backwards while the feet skim forwards"},
-    {"twerk", "four phases: rise circling, turn about, bounce, sink circling"},
+    {"show", "four phases: rise circling, turn about, twerk, sink circling"},
 };
 
 constexpr int kRoutineCount = static_cast<int>(sizeof(kRoutines) / sizeof(kRoutines[0]));
@@ -34,8 +34,17 @@ constexpr double kWaveLift = 70.0;    // mm the waving foot is raised
 constexpr double kWaveSwing = 40.0;   // mm it sweeps either side
 constexpr int kWaveLeg = 0;           // a corner leg: five stay planted
 
-constexpr double kTwerkDip = 22.0;    // mm at the rear
+constexpr double kTwerkDip = 28.0;    // mm at the rear
 constexpr double kTwerkSway = 10.0;   // mm of fore-aft hip shift
+
+// How much of the dip each leg takes. y is the fore-aft axis: legs 0 and 5
+// sit at +189 (front), 1 and 4 at 0 (middle), 2 and 3 at -189 (rear).
+//
+// The front pair take none of it, so the body pitches about its front feet as
+// a hinge instead of see-sawing about its centre. That differential is what
+// makes the motion read as the rear moving rather than the whole robot
+// rocking -- it matters more than the amplitude does.
+constexpr double kTwerkBias[kLegCount] = {0.0, 0.5, 1.0, 1.0, 0.5, 0.0};
 
 // The moonwalk illusion is entirely about the feet barely leaving the floor:
 // lift them properly and it reads as an ordinary backward walk.
@@ -43,10 +52,8 @@ constexpr double kMoonGlide = 26.0;    // mm travelled backwards per beat
 constexpr double kMoonSkim = 7.0;      // mm of lift -- just clear of the floor
 constexpr double kMoonLeanDeg = 8.0;   // forward lean, against the direction of travel
 
-// The staged routine. A bigger front-to-back differential than `bounce`, and
-// a slower circle over the top of it.
-constexpr double kShowDip = 28.0;
-constexpr double kShowBias[kLegCount] = {0.0, 0.5, 1.0, 1.0, 0.5, 0.0};
+// The staged routine reuses the twerk dip and bias, and lays a slow circle
+// over the top of them.
 constexpr double kShowTiltDeg = 9.0;
 constexpr int kShowRideHeight = 60;    // stands tall for the middle of the routine
 constexpr int kShowFloorHeight = -20;  // and finishes down on the floor
@@ -57,12 +64,6 @@ constexpr int kShowFloorHeight = -20;  // and finishes down on the floor
 // degrees a foot swings 60 mm from neutral and comes within 8 mm of the limit.
 constexpr double kShowYawPerCycle = 20.0;
 constexpr int kShowMinTurnFrames = 12;
-
-// How much of the dip each leg takes. y is the fore-aft axis: legs 0 and 5
-// sit at +189 (front), 1 and 4 at 0 (middle), 2 and 3 at -189 (rear). Loading
-// the rear and barely moving the front is what makes the body pitch about its
-// front feet rather than see-saw about its centre.
-constexpr double kTwerkBias[kLegCount] = {0.15, 0.6, 1.0, 1.0, 0.6, 0.15};
 
 void apply_attitude(Control& control, double roll, double pitch, double yaw)
 {
@@ -197,7 +198,7 @@ void twerk_show(Control& control, int frames_per_beat, int repeats)
             FootPositions points = control.calculate_posture_balance(
                 kShowTiltDeg * std::sin(slow), kShowTiltDeg * std::cos(slow), 0.0);
             for (int leg = 0; leg < kLegCount; ++leg) {
-                points[leg].z += kShowDip * kShowBias[leg] * drop;
+                points[leg].z += kTwerkDip * kTwerkBias[leg] * drop;
             }
             apply_points(control, points);
         }
@@ -240,7 +241,7 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
         moonwalk(control, frames_per_beat, repeats);
         return true;
     }
-    if (std::strcmp(name, "twerk") == 0) {
+    if (std::strcmp(name, "show") == 0) {
         twerk_show(control, frames_per_beat, repeats);
         return true;
     }
@@ -286,7 +287,7 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
                 }
                 apply_points(control, points);
 
-            } else if (std::strcmp(name, "bounce") == 0) {
+            } else if (std::strcmp(name, "twerk") == 0) {
                 // Double time: two dips per beat, so it reads as a bounce
                 // rather than the slow rise and fall of bob.
                 FootPositions points = neutral;
