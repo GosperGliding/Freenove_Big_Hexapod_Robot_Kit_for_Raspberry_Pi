@@ -93,7 +93,7 @@ instead of the original jump to full height on the first frame.
 |---|---|
 | `sway` | rolls side to side |
 | `twist` | rotates the body about its centre |
-| `circle` | roll and pitch in quadrature; the body describes a cone |
+| `circle` | roll and pitch in quadrature; the body describes a cone (tilt adapts to ride height) |
 | `bob` | rises and dips on the spot |
 | `pushup` | dips deep and presses back up |
 | `wave` | plants five legs and waves the sixth |
@@ -113,6 +113,22 @@ the motion reads than the amplitude does.
 seconds at the defaults: spirals up to ride height 60 over two circles, turns
 180 degrees on the ripple pattern, twerks with a slow circle laid over it, then
 spirals down to the floor. `--cycles` sets the length of the twerk phase only.
+
+**`circle`** picks its own tilt. How far the body can lean depends entirely on
+how much reach the legs have left over, which depends on ride height -- so it
+probes for the largest tilt that keeps every foot inside 225 mm, all the way
+round, before emitting a frame. Probing moves nothing: `transform_coordinates`
+only writes `leg_positions`, and the servos see nothing until `set_leg_angles`.
+
+| ride height | tilt |
+|---|---|
+| 0 | 32 degrees |
+| 40 (default) | 28 degrees |
+| 80 | 14 degrees |
+
+A single constant would have to be safe at 80, which means 14 everywhere --
+throwing away more than half the range available at the default height. Stand
+the robot lower with `--height` and it leans further.
 
 **`moonwalk`** is an honest approximation. The real illusion needs one foot
 sliding while another takes weight, and six legs in a wave never give that

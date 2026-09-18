@@ -28,4 +28,9 @@ const Routine* find_routine(const char* name);
 // they can be chained without leaving the body tilted.
 bool perform(Control& control, const char* name, int frames_per_beat, int repeats);
 
+// The tilt `circle` would use at the robot's current ride height. Exposed so
+// the adaptive behaviour can be asserted directly, and so a caller can report
+// it; it moves nothing.
+double probed_circle_tilt(Control& control);
+
 }  // namespace hexapod::dance

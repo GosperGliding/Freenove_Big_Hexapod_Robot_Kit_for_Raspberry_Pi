@@ -23,11 +23,24 @@ const Routine kRoutines[] = {
 
 constexpr int kRoutineCount = static_cast<int>(sizeof(kRoutines) / sizeof(kRoutines[0]));
 
-// Amplitudes are held well inside the reach envelope; test/unit_test.cpp runs
-// every routine and asserts no frame is ever rejected as unreachable.
+// Fixed amplitudes, chosen to sit inside the reach envelope at every ride
+// height the tool allows. test/unit_test.cpp runs every routine at heights 0,
+// 40 and 80 and asserts no frame is ever rejected as unreachable.
+//
+// `circle` is the exception: it probes instead, because a single number safe
+// at height 80 throws away most of the range available lower down.
 constexpr double kSwayRollDeg = 12.0;
 constexpr double kTwistYawDeg = 15.0;
-constexpr double kCircleTiltDeg = 10.0;
+// How far `circle` will try to lean. It rarely gets all of this: the actual
+// tilt is probed against the current ride height, because how much the body
+// can lean depends entirely on how much reach the legs have left over. A
+// fixed constant would have to be safe at the tallest ride height, capping it
+// near 15 degrees -- timid down low, where 35 is comfortable.
+constexpr double kCircleTiltMax = 32.0;
+
+// 8 mm short of the 233 mm the legs can physically span, so a probe that just
+// passes still has somewhere to go.
+constexpr double kSafeReach = 225.0;
 constexpr double kBobRise = 15.0;     // mm either side of neutral
 constexpr double kPushupDip = 30.0;   // mm, downward only
 constexpr double kWaveLift = 70.0;    // mm the waving foot is raised
@@ -82,6 +95,39 @@ void apply_points(Control& control, const FootPositions& points)
 double eased(double turns)
 {
     return std::sin(2.0 * kPi * turns);
+}
+
+// The largest tilt that keeps every foot inside kSafeReach, all the way round
+// a full circle, at whatever ride height the robot is currently at.
+//
+// Probing rather than assuming costs a few hundred floating-point evaluations
+// once per routine, and moves nothing: transform_coordinates only writes
+// leg_positions, and the servos see nothing until set_leg_angles is called.
+//
+// Not using Control::check_point_validity here on purpose -- its upper bound
+// is 248 mm, which is looser than the 233 the legs can actually span, so it
+// would wave through poses the IK then silently clamps.
+double probe_max_tilt(Control& control, double requested)
+{
+    for (double tilt = requested; tilt > 2.0; tilt -= 1.0) {
+        bool fits = true;
+        for (int step = 0; step < 360 && fits; step += 15) {
+            const double angle = static_cast<double>(step) / 180.0 * kPi;
+            control.transform_coordinates(control.calculate_posture_balance(
+                tilt * std::sin(angle), tilt * std::cos(angle), 0.0));
+
+            for (const Vec3& p : control.leg_positions()) {
+                if (std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) > kSafeReach) {
+                    fits = false;
+                    break;
+                }
+            }
+        }
+        if (fits) {
+            return tilt;
+        }
+    }
+    return 2.0;
 }
 
 // move_position takes the inverse of body height: body_height = -30 - z.
@@ -209,6 +255,11 @@ void twerk_show(Control& control, int frames_per_beat, int repeats)
 
 }  // namespace
 
+double probed_circle_tilt(Control& control)
+{
+    return probe_max_tilt(control, kCircleTiltMax);
+}
+
 const Routine* routines()
 {
     return kRoutines;
@@ -246,6 +297,12 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
         return true;
     }
 
+    // Probed once, before any frame is emitted: the answer depends on ride
+    // height, which does not change during a routine.
+    const double circle_tilt = (std::strcmp(name, "circle") == 0)
+                                   ? probe_max_tilt(control, kCircleTiltMax)
+                                   : 0.0;
+
     const FootPositions neutral = control.body_points();
     const bool is_attitude = std::strcmp(name, "sway") == 0 ||
                              std::strcmp(name, "twist") == 0 ||
@@ -265,8 +322,8 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
                 // Quadrature: roll leads pitch by a quarter turn, so the body
                 // axis sweeps a cone rather than rocking in one plane.
                 const double angle = 2.0 * kPi * turns;
-                apply_attitude(control, kCircleTiltDeg * std::sin(angle),
-                               kCircleTiltDeg * std::cos(angle), 0.0);
+                apply_attitude(control, circle_tilt * std::sin(angle),
+                               circle_tilt * std::cos(angle), 0.0);
 
             } else if (std::strcmp(name, "bob") == 0) {
                 // Neutral z is negative, so adding to it brings the foot

@@ -289,6 +289,31 @@ void test_foot_trajectory()
     expect_true(peak > 39.0, "swing reaches close to full step height");
 }
 
+// The circle routine probes for the largest tilt the current ride height can
+// carry. Check the probe is actually adaptive -- a fixed constant would have
+// to be safe at height 80, and would be needlessly timid at height 0.
+void test_circle_tilt_adapts_to_height()
+{
+    double previous = 1e9;
+    for (int height : {0, 40, 80}) {
+        CountingBus bus;
+        hexapod::Control control(bus, nominal_calibration());
+        raise_to(control, height);
+        bus.reset();
+
+        hexapod::dance::perform(control, "circle", 60, 1);
+        expect_eq(bus.unreachable(), 0, "circle stays in reach");
+
+        // Taller stance, less reach to spare, so less tilt available.
+        const double reach = hexapod::dance::probed_circle_tilt(control);
+        std::printf("        circle tilt at ride height %2d: %.0f degrees\n",
+                    height, reach);
+        expect_true(reach < previous, "taller stance yields less tilt");
+        expect_true(reach >= 8.0, "some tilt is always available");
+        previous = reach;
+    }
+}
+
 }  // namespace
 
 int main()
@@ -303,6 +328,7 @@ int main()
     test_foot_trajectory();
     test_gait_patterns_stay_in_reach();
     test_dance_routines_stay_in_reach();
+    test_circle_tilt_adapts_to_height();
 
     if (failures == 0) {
         std::printf("  PASS  all unit tests\n");
