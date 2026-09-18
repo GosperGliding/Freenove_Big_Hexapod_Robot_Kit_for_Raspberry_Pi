@@ -2,6 +2,7 @@
 //
 // Linux only. Build on the robot with `make robot`.
 
+#include "hexapod/battery.hpp"
 #include "hexapod/control.hpp"
 #include "hexapod/paced_bus.hpp"
 #include "hexapod/pca9685_bus.hpp"
@@ -47,6 +48,7 @@ struct Options {
     int speed{10};
     int angle{0};
     int cycles{3};
+    int height{20};
     long period_ms{30};
     long arm_delay_ms{3000};
     std::string device{"/dev/i2c-1"};
@@ -67,6 +69,7 @@ void usage()
         "  --speed N         2..10; higher means fewer, larger frames (default 10)\n"
         "  --angle N         yaw per cycle, degrees          (default 0)\n"
         "  --cycles N        gait cycles to run              (default 3)\n"
+        "  --height N        ride height, -20..20; higher stands taller (default 20)\n"
         "  --period-ms N     frame period                    (default 30)\n"
         "  --arm-delay-ms N  pause before the first servo command (default 3000)\n"
         "  --i2c PATH        I2C device                      (default /dev/i2c-1)\n"
@@ -130,6 +133,8 @@ bool parse_options(int argc, char** argv, Options* options)
             if (!take_int(&options->angle)) return false;
         } else if (flag == "--cycles") {
             if (!take_int(&options->cycles)) return false;
+        } else if (flag == "--height") {
+            if (!take_int(&options->height)) return false;
         } else if (flag == "--period-ms") {
             if (!take_long(&options->period_ms)) return false;
         } else if (flag == "--arm-delay-ms") {
@@ -204,6 +209,30 @@ int main(int argc, char** argv)
         }
         inner = &i2c_bus;
 
+        // Check the packs before doing anything else. The PCA9685s draw their
+        // logic supply from the Pi, so a flat servo pack is completely
+        // invisible from the I2C side: every write succeeds, the run reports a
+        // clean 268 transactions, and nothing moves.
+        hexapod::BatteryMonitor battery;
+        if (battery.open(options.device, &error)) {
+            double pack_a = 0.0;
+            double pack_b = 0.0;
+            if (battery.read(&pack_a, &pack_b, &error)) {
+                std::printf("battery packs: %.2f V and %.2f V (need %.1f V each)\n",
+                            pack_a, pack_b, hexapod::BatteryMonitor::kMinPackVolts);
+                if (pack_a < hexapod::BatteryMonitor::kMinPackVolts ||
+                    pack_b < hexapod::BatteryMonitor::kMinPackVolts) {
+                    std::printf("WARNING: a pack is below the %.1f V minimum. "
+                                "The servos will not move, however clean the I2C looks.\n",
+                                hexapod::BatteryMonitor::kMinPackVolts);
+                }
+            } else {
+                std::fprintf(stderr, "battery read failed: %s\n", error.c_str());
+            }
+        } else {
+            std::fprintf(stderr, "battery monitor unavailable: %s\n", error.c_str());
+        }
+
         if (options.no_servo_power) {
             // Every register write still goes out on the wire; only the rail
             // stays dead. This is the mode for validating the driver on a
@@ -244,6 +273,33 @@ int main(int argc, char** argv)
     bus.reset();
     hexapod::Control control(bus, calibration);
 
+    // Stand up before walking.
+    //
+    // body_height defaults to -25 mm, which leaves the chassis on the ground:
+    // the gait runs, the legs cycle, and the robot drags itself rather than
+    // stepping. move_position sets body_height to -30 - height, so a larger
+    // height stands taller; 20 is the limit and gives -50 mm, a 25 mm lift.
+    //
+    // Ramped one millimetre per call rather than applied in one go, because
+    // move_position drives straight to the new pose -- a 25 mm jump across all
+    // 18 joints at once is a violent move. Each step is one frame, so PacedBus
+    // times the ascent for free.
+    int height = options.height;
+    if (height > 20) {
+        height = 20;
+    }
+    if (height < -20) {
+        height = -20;
+    }
+    std::printf("standing up: ride height %d (body %d mm)\n", height, -30 - height);
+    const int rise = (height >= 0) ? 1 : -1;
+    for (int z = 0;; z += rise) {
+        control.move_position(0, 0, z);
+        if (z == height) {
+            break;
+        }
+    }
+
     hexapod::GaitCommand command;
     command.gait = options.gait;
     command.x = options.x;
@@ -274,11 +330,23 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    std::printf("i2c transactions %ld over %ld frames (%.1f per frame)\n",
+    std::printf("i2c transactions %ld over %ld frames (%.1f per frame), %ld failed\n",
                 i2c_bus.transactions(), i2c_bus.frames(),
                 i2c_bus.frames() > 0
                     ? static_cast<double>(i2c_bus.transactions()) / i2c_bus.frames()
-                    : 0.0);
+                    : 0.0,
+                i2c_bus.failed_writes());
+    if (i2c_bus.failed_writes() > 0) {
+        std::printf("WARNING: %ld i2c writes were not accepted -- a chip stopped "
+                    "acknowledging, so some joints held their last position.\n",
+                    i2c_bus.failed_writes());
+    }
+
+    // Sit down before cutting power. relax() disables the outputs, so from a
+    // standing pose the robot would simply drop; lowering first lets it settle.
+    for (int z = height; z >= -20; --z) {
+        control.move_position(0, 0, z);
+    }
 
     // Park the legs before cutting power, so the robot relaxes rather than
     // dropping under its own weight with the outputs still asserted.

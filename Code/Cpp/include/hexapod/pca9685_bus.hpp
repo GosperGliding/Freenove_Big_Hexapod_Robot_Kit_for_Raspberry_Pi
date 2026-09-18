@@ -43,6 +43,11 @@ public:
     long transactions() const { return transactions_; }
     long frames() const { return frames_; }
 
+    // Transactions the kernel did not accept in full -- a chip that stops
+    // acknowledging mid-run. Without this, a dead chip still reports a clean
+    // transaction count, because flush() computed the failure and dropped it.
+    long failed_writes() const { return failed_writes_; }
+
 private:
     struct Chip {
         int fd{-1};
@@ -64,6 +69,7 @@ private:
     Chip chips_[2];
     long transactions_{0};
     long frames_{0};
+    long failed_writes_{0};
 };
 
 }  // namespace hexapod

@@ -210,6 +210,7 @@ bool Pca9685Bus::flush(Chip& chip)
             1 + static_cast<std::size_t>(run.count) * pwm::kRegisterBytesPerChannel;
         if (::write(chip.fd, payload, length) != static_cast<ssize_t>(length)) {
             ok = false;
+            ++failed_writes_;
         }
         ++transactions_;
     }

@@ -68,6 +68,23 @@ except the servos moving, since their V+ rail is dead.
 `--no-servo-power` is also the right way to make the *first* run with batteries
 fitted: identical I2C traffic, rail never energised, nothing moves.
 
+### Silent failures the tool now reports
+
+Two states used to look identical to a clean run, because neither shows up on
+the I2C side:
+
+**A flat servo pack.** The PCA9685s take their logic supply from the Pi, so
+every register write succeeds and the run reports its usual transaction count
+while nothing moves. `hexapod_walk` now reads both packs through the ADS7830 at
+startup and warns below the 7 V minimum. Treat the number as indicative rather
+than calibrated — `adc.py` hardcodes a divider coefficient its own comment says
+is PCB-version dependent, and never looks the version up. It is reliable for
+"flat or not", which is what it is used for.
+
+**A chip that stops acknowledging.** `Pca9685Bus::flush()` always knew when a
+write was refused and threw the result away. Failures are now counted and
+reported on the summary line.
+
 ### Read this before the first run
 
 **Startup is a full-authority move.** Constructing `Control` calibrates and

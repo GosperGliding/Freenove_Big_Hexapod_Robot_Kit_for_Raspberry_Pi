@@ -40,7 +40,7 @@ BIN      := hexapod_trace
 UNIT_BIN := hexapod_unit
 
 # Robot-only: opens /dev/i2c-N and /dev/gpiochipN.
-ROBOT_SRC  := src/pca9685_bus.cpp src/paced_bus.cpp src/servo_power.cpp
+ROBOT_SRC  := src/pca9685_bus.cpp src/paced_bus.cpp src/servo_power.cpp src/battery.cpp
 ROBOT_TOOL := tools/hexapod_walk.cpp
 ROBOT_BIN  := hexapod_walk
 
