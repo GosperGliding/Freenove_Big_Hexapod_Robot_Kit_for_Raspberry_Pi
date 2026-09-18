@@ -34,6 +34,10 @@ sudo ./hexapod_walk             # 3 tripod cycles forward
 --gait 2            wave gait instead of tripod
 --y -35             walk backwards
 --angle 10          turn while walking
+--list              show every gait pattern and dance
+--pattern ripple    phase-based gait engine: tripod, ripple, wave
+--dance twerk       a routine instead of walking
+--frames 90         frames per cycle for --pattern and --dance (default 60)
 --straighten        hold the assembly reference pose and wait
 --height 60         stand taller; -20..80, default 40
 --period-ms 20      faster frames -- see the warning below
@@ -69,6 +73,39 @@ except the servos moving, since their V+ rail is dead.
 
 `--no-servo-power` is also the right way to make the *first* run with batteries
 fitted: identical I2C traffic, rail never energised, nothing moves.
+
+### Gaits and dances
+
+`Control::run_gait` is the faithful port and stays untouched. Alongside it sits
+a second engine where a gait is *data* -- a phase offset per leg and a duty
+factor -- rather than a chain of frame-index branches. Foot position is an
+absolute function of phase, so nothing accumulates, and swing follows a
+half-sine: a foot leaves and meets the ground with zero vertical velocity,
+instead of the original jump to full height on the first frame.
+
+| `--pattern` | feet down | character |
+|---|---|---|
+| `tripod` | 3 | fastest, least margin |
+| `ripple` | 4 | travelling wave, smooth compromise |
+| `wave` | 5 | slowest, steadiest |
+
+| `--dance` | |
+|---|---|
+| `sway` | rolls side to side |
+| `twist` | rotates the body about its centre |
+| `circle` | roll and pitch in quadrature; the body describes a cone |
+| `bob` | rises and dips on the spot |
+| `pushup` | dips deep and presses back up |
+| `wave` | plants five legs and waves the sixth |
+| `twerk` | rear-biased double-time bounce with a hip sway |
+
+All but `wave` keep six feet planted, so the support polygon never changes and
+they hold at amplitudes a gait could not.
+
+`test/unit_test.cpp` runs every pattern at worst-case stride and every routine,
+at ride heights 0, 40 and 80, and asserts Control never rejects a frame as
+unreachable. Both tables are iterated, so a new entry is covered the moment it
+is added.
 
 ### Straightening the legs
 

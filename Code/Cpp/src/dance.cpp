@@ -14,6 +14,7 @@ const Routine kRoutines[] = {
     {"bob", "rise and dip on the spot"},
     {"pushup", "dip deep and press back up"},
     {"wave", "plant five legs and wave the sixth"},
+    {"twerk", "rear-biased double-time bounce with a hip sway"},
 };
 
 constexpr int kRoutineCount = static_cast<int>(sizeof(kRoutines) / sizeof(kRoutines[0]));
@@ -28,6 +29,15 @@ constexpr double kPushupDip = 30.0;   // mm, downward only
 constexpr double kWaveLift = 70.0;    // mm the waving foot is raised
 constexpr double kWaveSwing = 40.0;   // mm it sweeps either side
 constexpr int kWaveLeg = 0;           // a corner leg: five stay planted
+
+constexpr double kTwerkDip = 22.0;    // mm at the rear
+constexpr double kTwerkSway = 10.0;   // mm of fore-aft hip shift
+
+// How much of the dip each leg takes. y is the fore-aft axis: legs 0 and 5
+// sit at +189 (front), 1 and 4 at 0 (middle), 2 and 3 at -189 (rear). Loading
+// the rear and barely moving the front is what makes the body pitch about its
+// front feet rather than see-saw about its centre.
+constexpr double kTwerkBias[kLegCount] = {0.15, 0.6, 1.0, 1.0, 0.6, 0.15};
 
 void apply_attitude(Control& control, double roll, double pitch, double yaw)
 {
@@ -114,6 +124,21 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
                 const double dip = kPushupDip * 0.5 * (1.0 - std::cos(2.0 * kPi * turns));
                 for (int leg = 0; leg < kLegCount; ++leg) {
                     points[leg].z = neutral[leg].z + dip;
+                }
+                apply_points(control, points);
+
+            } else if (std::strcmp(name, "twerk") == 0) {
+                // Double time: two dips per beat, so it reads as a bounce
+                // rather than the slow rise and fall of bob.
+                FootPositions points = neutral;
+                const double beat_angle = 4.0 * kPi * turns;
+                const double drop = 0.5 * (1.0 - std::cos(beat_angle));  // 0..1
+                const double sway = kTwerkSway * std::sin(beat_angle);
+                for (int leg = 0; leg < kLegCount; ++leg) {
+                    points[leg].z = neutral[leg].z + kTwerkDip * kTwerkBias[leg] * drop;
+                    // Quadrature with the drop, so the hips travel through the
+                    // bounce instead of bobbing straight up and down.
+                    points[leg].y = neutral[leg].y + sway;
                 }
                 apply_points(control, points);
 
