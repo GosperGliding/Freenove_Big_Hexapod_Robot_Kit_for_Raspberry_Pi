@@ -1,6 +1,7 @@
 #include "hexapod/dance.hpp"
 
 #include "hexapod/gait.hpp"
+#include "hexapod/kinematics.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -31,16 +32,22 @@ constexpr int kRoutineCount = static_cast<int>(sizeof(kRoutines) / sizeof(kRouti
 // at height 80 throws away most of the range available lower down.
 constexpr double kSwayRollDeg = 12.0;
 constexpr double kTwistYawDeg = 15.0;
-// How far `circle` will try to lean. It rarely gets all of this: the actual
-// tilt is probed against the current ride height, because how much the body
-// can lean depends entirely on how much reach the legs have left over. A
-// fixed constant would have to be safe at the tallest ride height, capping it
-// near 15 degrees -- timid down low, where 35 is comfortable.
-constexpr double kCircleTiltMax = 32.0;
+// The ceiling `circle` probes down from.
+//
+// At ride heights 40 and 80 the legs bind first, at 36 and 24 degrees. Down
+// at 0 this cap is what stops it -- but 60 degrees of body lean is already
+// past what is sensible to ask of a machine whose feet are merely resting on
+// the floor, so the cap stands as a judgement rather than a measurement.
+constexpr double kCircleTiltCeiling = 60.0;
 
 // 8 mm short of the 233 mm the legs can physically span, so a probe that just
 // passes still has somewhere to go.
 constexpr double kSafeReach = 225.0;
+
+// How far in the feet may be drawn. Tucking buys tilt, but it also shrinks
+// the polygon the centre of mass has to stay inside while the body leans --
+// so this stops well short of what the joints would tolerate.
+constexpr double kMinTuck = 0.86;
 constexpr double kBobRise = 15.0;     // mm either side of neutral
 constexpr double kPushupDip = 30.0;   // mm, downward only
 constexpr double kWaveLift = 70.0;    // mm the waving foot is raised
@@ -97,37 +104,74 @@ double eased(double turns)
     return std::sin(2.0 * kPi * turns);
 }
 
-// The largest tilt that keeps every foot inside kSafeReach, all the way round
-// a full circle, at whatever ride height the robot is currently at.
+// Draw the stance in toward the body centre. `tuck` of 1.0 is nominal.
 //
-// Probing rather than assuming costs a few hundred floating-point evaluations
-// once per routine, and moves nothing: transform_coordinates only writes
-// leg_positions, and the servos see nothing until set_leg_angles is called.
-//
-// Not using Control::check_point_validity here on purpose -- its upper bound
-// is 248 mm, which is looser than the 233 the legs can actually span, so it
-// would wave through poses the IK then silently clamps.
-double probe_max_tilt(Control& control, double requested)
+// A rotation is linear, so scaling the footpoints before rotating gives the
+// same answer as scaling the rotated result about the body centre. That means
+// this can reuse calculate_posture_balance rather than duplicating its
+// rotation maths, which is the part worth not copying.
+FootPositions tucked(const FootPositions& points, double body_height, double tuck)
 {
-    for (double tilt = requested; tilt > 2.0; tilt -= 1.0) {
-        bool fits = true;
-        for (int step = 0; step < 360 && fits; step += 15) {
-            const double angle = static_cast<double>(step) / 180.0 * kPi;
-            control.transform_coordinates(control.calculate_posture_balance(
-                tilt * std::sin(angle), tilt * std::cos(angle), 0.0));
+    FootPositions out = points;
+    for (int i = 0; i < kLegCount; ++i) {
+        out[i].x = points[i].x * tuck;
+        out[i].y = points[i].y * tuck;
+        out[i].z = body_height + (points[i].z - body_height) * tuck;
+    }
+    return out;
+}
 
-            for (const Vec3& p : control.leg_positions()) {
-                if (std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) > kSafeReach) {
-                    fits = false;
-                    break;
-                }
+bool sweep_fits(Control& control, double tilt, double tuck)
+{
+    const double body_height = control.body_height();
+    for (int step = 0; step < 360; step += 15) {
+        const double angle = static_cast<double>(step) / 180.0 * kPi;
+        control.transform_coordinates(tucked(
+            control.calculate_posture_balance(tilt * std::sin(angle),
+                                              tilt * std::cos(angle), 0.0),
+            body_height, tuck));
+
+        for (const Vec3& p : control.leg_positions()) {
+            const double reach = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+            // Both bounds matter. The upper one is obvious; the lower one is
+            // what stops a deep tuck, by folding the leg in so tight the foot
+            // comes closer to the coxa than the joints allow.
+            if (reach > kSafeReach || reach < kinematics::kMinReach) {
+                return false;
             }
         }
-        if (fits) {
-            return tilt;
+    }
+    return true;
+}
+
+// The widest cone the legs will carry at the current ride height, searching
+// over both how far the body leans and how far the feet are drawn in.
+//
+// Tucking is not a free win. Pulling the feet in unloads the outer reach
+// limit, but past roughly 0.85 the inner limit takes over and the available
+// tilt collapses -- at ride height 0 it goes 47 degrees at nominal, 60 at
+// 0.9, then 11 at 0.8. Hence a search rather than a constant.
+//
+// Probing moves nothing: transform_coordinates only writes leg_positions, and
+// the servos see nothing until set_leg_angles is called.
+//
+// Deliberately not using Control::check_point_validity -- its upper bound is
+// 248 mm, looser than the 233 the legs can actually span, so it would wave
+// through poses the IK then silently clamps.
+CircleShape probe_circle(Control& control, double ceiling)
+{
+    CircleShape best{2.0, 1.0};
+
+    for (double tuck = 1.0; tuck >= kMinTuck - 1e-9; tuck -= 0.02) {
+        for (double tilt = ceiling; tilt > best.tilt; tilt -= 1.0) {
+            if (sweep_fits(control, tilt, tuck)) {
+                best.tilt = tilt;
+                best.tuck = tuck;
+                break;
+            }
         }
     }
-    return 2.0;
+    return best;
 }
 
 // move_position takes the inverse of body height: body_height = -30 - z.
@@ -255,9 +299,9 @@ void twerk_show(Control& control, int frames_per_beat, int repeats)
 
 }  // namespace
 
-double probed_circle_tilt(Control& control)
+CircleShape probed_circle_shape(Control& control)
 {
-    return probe_max_tilt(control, kCircleTiltMax);
+    return probe_circle(control, kCircleTiltCeiling);
 }
 
 const Routine* routines()
@@ -299,9 +343,9 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
 
     // Probed once, before any frame is emitted: the answer depends on ride
     // height, which does not change during a routine.
-    const double circle_tilt = (std::strcmp(name, "circle") == 0)
-                                   ? probe_max_tilt(control, kCircleTiltMax)
-                                   : 0.0;
+    const CircleShape circle = (std::strcmp(name, "circle") == 0)
+                                   ? probe_circle(control, kCircleTiltCeiling)
+                                   : CircleShape{0.0, 1.0};
 
     const FootPositions neutral = control.body_points();
     const bool is_attitude = std::strcmp(name, "sway") == 0 ||
@@ -322,8 +366,11 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
                 // Quadrature: roll leads pitch by a quarter turn, so the body
                 // axis sweeps a cone rather than rocking in one plane.
                 const double angle = 2.0 * kPi * turns;
-                apply_attitude(control, circle_tilt * std::sin(angle),
-                               circle_tilt * std::cos(angle), 0.0);
+                apply_points(control,
+                             tucked(control.calculate_posture_balance(
+                                        circle.tilt * std::sin(angle),
+                                        circle.tilt * std::cos(angle), 0.0),
+                                    control.body_height(), circle.tuck));
 
             } else if (std::strcmp(name, "bob") == 0) {
                 // Neutral z is negative, so adding to it brings the foot

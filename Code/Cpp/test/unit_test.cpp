@@ -305,12 +305,14 @@ void test_circle_tilt_adapts_to_height()
         expect_eq(bus.unreachable(), 0, "circle stays in reach");
 
         // Taller stance, less reach to spare, so less tilt available.
-        const double reach = hexapod::dance::probed_circle_tilt(control);
-        std::printf("        circle tilt at ride height %2d: %.0f degrees\n",
-                    height, reach);
-        expect_true(reach < previous, "taller stance yields less tilt");
-        expect_true(reach >= 8.0, "some tilt is always available");
-        previous = reach;
+        const hexapod::dance::CircleShape shape =
+            hexapod::dance::probed_circle_shape(control);
+        std::printf("        circle at ride height %2d: %.0f degrees, feet at %.0f%%\n",
+                    height, shape.tilt, shape.tuck * 100.0);
+        expect_true(shape.tilt < previous, "taller stance yields less tilt");
+        expect_true(shape.tilt >= 8.0, "some tilt is always available");
+        expect_true(shape.tuck <= 1.0 && shape.tuck >= 0.8, "tuck stays sane");
+        previous = shape.tilt;
     }
 }
 

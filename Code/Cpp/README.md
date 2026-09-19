@@ -114,21 +114,28 @@ seconds at the defaults: spirals up to ride height 60 over two circles, turns
 180 degrees on the ripple pattern, twerks with a slow circle laid over it, then
 spirals down to the floor. `--cycles` sets the length of the twerk phase only.
 
-**`circle`** picks its own tilt. How far the body can lean depends entirely on
-how much reach the legs have left over, which depends on ride height -- so it
-probes for the largest tilt that keeps every foot inside 225 mm, all the way
-round, before emitting a frame. Probing moves nothing: `transform_coordinates`
-only writes `leg_positions`, and the servos see nothing until `set_leg_angles`.
+**`circle`** picks its own shape. It searches two axes before emitting a
+frame: how far the body leans, and how far in the feet are drawn. Drawing the
+feet in unloads the outer reach limit and buys a lot of lean.
 
-| ride height | tilt |
-|---|---|
-| 0 | 32 degrees |
-| 40 (default) | 28 degrees |
-| 80 | 14 degrees |
+| ride height | tilt | feet at |
+|---|---|---|
+| 0 | 60 degrees | 90% |
+| 40 (default) | 36 degrees | 92% |
+| 80 | 24 degrees | 86% |
 
-A single constant would have to be safe at 80, which means 14 everywhere --
-throwing away more than half the range available at the default height. Stand
-the robot lower with `--height` and it leans further.
+Tucking is **not** monotonic, which is why this is a search and not a
+constant. Past roughly 0.85 the envelope's *lower* bound takes over -- the leg
+folds in so tight the foot comes closer to the coxa than 90 mm -- and the
+available tilt collapses. At ride height 0 it runs 47 degrees at nominal
+stance, 60 at 0.9, then 11 at 0.8.
+
+Probing moves nothing: `transform_coordinates` only writes `leg_positions`,
+and the servos see nothing until `set_leg_angles` is called.
+
+Stand the robot lower with `--height` and it leans further. The tuck is capped
+at 0.86 -- deeper would pass the reach check but shrinks the polygon the centre
+of mass has to stay inside while the body is leaning hard.
 
 **`moonwalk`** is an honest approximation. The real illusion needs one foot
 sliding while another takes weight, and six legs in a wave never give that
