@@ -62,6 +62,7 @@ struct Options {
     bool straighten{false};
     bool list{false};
     int frames{60};
+    int twerk_bias{90};  // percent
     std::string pattern;
     std::string routine;
 };
@@ -90,6 +91,9 @@ void usage()
         "  --pattern NAME    gait from the phase-based engine: tripod, ripple, wave\n"
         "  --dance NAME      a routine instead of walking; --list to see them\n"
         "  --frames N        frames per cycle for --pattern and --dance (default 60)\n"
+        "  --twerk-bias N    0..100, how much more the rear moves than the front\n"
+        "                    during twerk and show. 0 is a plain bob, 85 was the\n"
+        "                    first version, 100 holds the front legs still (default 90)\n"
         "  --list            print the available patterns and dances, then exit\n"
         "\n"
         "  --gait N          original engine: 1 = tripod, 2 = wave  (default 1)\n"
@@ -189,6 +193,8 @@ bool parse_options(int argc, char** argv, Options* options)
             options->points = argv[++i];
         } else if (flag == "--frames") {
             if (!take_int(&options->frames)) return false;
+        } else if (flag == "--twerk-bias") {
+            if (!take_int(&options->twerk_bias)) return false;
         } else if (flag == "--list") {
             options->list = true;
         } else if (flag == "--pattern") {
@@ -431,11 +437,13 @@ int main(int argc, char** argv)
     int completed = 0;
 
     if (!options.routine.empty()) {
-        std::printf("dance %s  repeats %d  frames %d  period %ld ms\n",
+        const double bias = options.twerk_bias / 100.0;
+        std::printf("dance %s  repeats %d  frames %d  period %ld ms  twerk bias %d%%\n",
                     options.routine.c_str(), options.cycles, options.frames,
-                    options.period_ms);
+                    options.period_ms, options.twerk_bias);
         for (int beat = 0; beat < options.cycles && g_stop == 0; ++beat) {
-            hexapod::dance::perform(control, options.routine.c_str(), options.frames, 1);
+            hexapod::dance::perform(control, options.routine.c_str(), options.frames, 1,
+                                    bias);
             ++completed;
         }
 

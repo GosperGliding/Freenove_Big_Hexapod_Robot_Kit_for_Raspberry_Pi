@@ -38,6 +38,7 @@ sudo ./hexapod_walk             # 3 tripod cycles forward
 --pattern ripple    phase-based gait engine: tripod, ripple, wave
 --dance twerk       a routine instead of walking; --list shows them all
 --frames 90         frames per cycle for --pattern and --dance (default 60)
+--twerk-bias 100    0..100, rear-vs-front differential (default 90)
 --straighten        hold the assembly reference pose and wait
 --height 60         stand taller; -20..80, default 40
 --period-ms 20      faster frames -- see the warning below
@@ -104,10 +105,19 @@ instead of the original jump to full height on the first frame.
 `sway` through `twerk` keep six feet planted, so the support polygon never
 changes and they hold at amplitudes a gait could not.
 
-**`twerk`** dips 28 mm at the rear on a `{0, 0.5, 1, 1, 0.5, 0}` bias -- the
-front pair take none of it, so the body pitches about its front feet as a hinge
-rather than see-sawing about its centre. That differential does more for how
-the motion reads than the amplitude does.
+**`twerk`** dips 28 mm at the rear, distributed across the legs by
+`--twerk-bias`. The differential does more for how the motion reads than the
+amplitude does, which is why it is the knob that got exposed rather than the
+dip:
+
+| `--twerk-bias` | front legs take | reads as |
+|---|---|---|
+| 0 | 100% | a plain bob, no differential |
+| 85 | 15% | the first version |
+| 90 (default) | 10% | |
+| 100 | 0% | body hinges about its front feet |
+
+It applies to the twerk phase of `show` too.
 
 **`show`** is a four-phase routine rather than one repeating beat, about 20
 seconds at the defaults: spirals up to ride height 60 over two circles, turns

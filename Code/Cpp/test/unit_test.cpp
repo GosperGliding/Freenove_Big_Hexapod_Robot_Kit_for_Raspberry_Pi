@@ -316,6 +316,31 @@ void test_circle_tilt_adapts_to_height()
     }
 }
 
+// The bias knob redistributes the dip between front and rear rather than
+// scaling it, so the extremes are not obviously equivalent: at bias 0 every
+// leg takes the full 28 mm at once, which is a different pose from the rear
+// taking it alone. Check both ends, and the staged routine as well.
+void test_twerk_bias_extremes_stay_in_reach()
+{
+    for (int height : {0, 40, 80}) {
+        for (double bias : {0.0, 0.5, 1.0}) {
+            for (const char* name : {"twerk", "show"}) {
+                CountingBus bus;
+                hexapod::Control control(bus, nominal_calibration());
+                raise_to(control, height);
+                bus.reset();
+
+                hexapod::dance::perform(control, name, 60, 1, bias);
+                if (bus.unreachable() != 0) {
+                    std::printf("  FAIL  %s at height %d bias %.2f: %ld unreachable\n",
+                                name, height, bias, bus.unreachable());
+                    ++failures;
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main()
@@ -331,6 +356,7 @@ int main()
     test_gait_patterns_stay_in_reach();
     test_dance_routines_stay_in_reach();
     test_circle_tilt_adapts_to_height();
+    test_twerk_bias_extremes_stay_in_reach();
 
     if (failures == 0) {
         std::printf("  PASS  all unit tests\n");

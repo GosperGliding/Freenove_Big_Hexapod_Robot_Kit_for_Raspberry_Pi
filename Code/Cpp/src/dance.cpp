@@ -57,14 +57,20 @@ constexpr int kWaveLeg = 0;           // a corner leg: five stay planted
 constexpr double kTwerkDip = 28.0;    // mm at the rear
 constexpr double kTwerkSway = 10.0;   // mm of fore-aft hip shift
 
-// How much of the dip each leg takes. y is the fore-aft axis: legs 0 and 5
-// sit at +189 (front), 1 and 4 at 0 (middle), 2 and 3 at -189 (rear).
+// Where each leg sits along the fore-aft axis: legs 0 and 5 at +189 (front),
+// 1 and 4 at 0 (middle), 2 and 3 at -189 (rear). 0 is fully front, 1 fully
+// rear.
+constexpr double kTwerkRank[kLegCount] = {0.0, 0.5, 1.0, 1.0, 0.5, 0.0};
+
+// Share of the dip one leg takes, from the single bias knob.
 //
-// The front pair take none of it, so the body pitches about its front feet as
-// a hinge instead of see-sawing about its centre. That differential is what
-// makes the motion read as the rear moving rather than the whole robot
-// rocking -- it matters more than the amplitude does.
-constexpr double kTwerkBias[kLegCount] = {0.0, 0.5, 1.0, 1.0, 0.5, 0.0};
+// At bias 1 the front pair get nothing and the body hinges about them; at 0
+// every leg dips alike and it is just a bob. The original version was 0.85,
+// which left the front legs taking 15%.
+double twerk_share(int leg, double bias)
+{
+    return 1.0 - bias * (1.0 - kTwerkRank[leg]);
+}
 
 // The moonwalk illusion is entirely about the feet barely leaving the floor:
 // lift them properly and it reads as an ordinary backward walk.
@@ -254,7 +260,7 @@ void moonwalk(Control& control, int frames_per_beat, int repeats)
 
 // Four phases: rise in a spiral, turn about, bounce with a slow circle over
 // it, then sink back to the floor in a spiral.
-void twerk_show(Control& control, int frames_per_beat, int repeats)
+void twerk_show(Control& control, int frames_per_beat, int repeats, double bias)
 {
     spiral_to_height(control, kShowRideHeight, 2.0);
 
@@ -288,7 +294,7 @@ void twerk_show(Control& control, int frames_per_beat, int repeats)
             FootPositions points = control.calculate_posture_balance(
                 kShowTiltDeg * std::sin(slow), kShowTiltDeg * std::cos(slow), 0.0);
             for (int leg = 0; leg < kLegCount; ++leg) {
-                points[leg].z += kTwerkDip * kTwerkBias[leg] * drop;
+                points[leg].z += kTwerkDip * twerk_share(leg, bias) * drop;
             }
             apply_points(control, points);
         }
@@ -324,8 +330,11 @@ const Routine* find_routine(const char* name)
     return nullptr;
 }
 
-bool perform(Control& control, const char* name, int frames_per_beat, int repeats)
+bool perform(Control& control, const char* name, int frames_per_beat, int repeats,
+             double bias)
 {
+    bias = (bias < 0.0) ? 0.0 : ((bias > 1.0) ? 1.0 : bias);
+
     if (find_routine(name) == nullptr || frames_per_beat < 1) {
         return false;
     }
@@ -337,7 +346,7 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
         return true;
     }
     if (std::strcmp(name, "show") == 0) {
-        twerk_show(control, frames_per_beat, repeats);
+        twerk_show(control, frames_per_beat, repeats, bias);
         return true;
     }
 
@@ -399,7 +408,7 @@ bool perform(Control& control, const char* name, int frames_per_beat, int repeat
                 const double drop = 0.5 * (1.0 - std::cos(beat_angle));  // 0..1
                 const double sway = kTwerkSway * std::sin(beat_angle);
                 for (int leg = 0; leg < kLegCount; ++leg) {
-                    points[leg].z = neutral[leg].z + kTwerkDip * kTwerkBias[leg] * drop;
+                    points[leg].z = neutral[leg].z + kTwerkDip * twerk_share(leg, bias) * drop;
                     // Quadrature with the drop, so the hips travel through the
                     // bounce instead of bobbing straight up and down.
                     points[leg].y = neutral[leg].y + sway;
