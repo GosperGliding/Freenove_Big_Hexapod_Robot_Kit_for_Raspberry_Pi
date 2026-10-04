@@ -1,144 +1,145 @@
 """Hardware access for the learning experiments, with the safety around it.
 
-Deliberately thin. Everything here is either talking to a device or stopping
-the robot hurting itself; the task and the search live elsewhere.
+Everything here either talks to a device or stops the robot hurting itself;
+the task and the search live elsewhere.
+
+Poses are leg-frame foot positions, driven through Code/Server's Control. That
+reuses the IK, the point.txt calibration offsets, the mirrored servo mapping
+and the channel map rather than copying any of them. What this module adds is
+the checking Control does not do -- a real reach limit and a joint-angle limit,
+applied to every frame before anything is written -- and the ramp.
 
 Attitude comes from the raw accelerometer rather than imu.py's fused estimate.
-For a *static* pose that is not a compromise, it is the better instrument:
-gravity alone fixes orientation when nothing is moving, so there is no
-integration, no drift, and no filter to be wrong. It also sidesteps two
-defects in the vendor's version -- imu.py returns (pitch, roll, yaw) while
-control.py unpacks it as (roll, pitch, yaw), and the quaternion z update
-multiplies by quaternion_x where the pattern requires gyro_x.
+For a static pose that is the better instrument: gravity alone fixes
+orientation when nothing is moving, so there is no integration, no drift, and
+no filter to be wrong.
 """
 
 import math
+import os
 import sys
 import time
+import types
 
-# The 18 leg joints, in leg order, as flat 0..31 servo channels. Taken from
-# Control.set_leg_angles -- note leg 3's tibia is on the other PCA9685.
-JOINT_CHANNELS = [
-    15, 14, 13,   # leg 1: coxa, femur, tibia
-    12, 11, 10,   # leg 2
-    9,  8,  31,   # leg 3
-    22, 23, 27,   # leg 4
-    19, 20, 21,   # leg 5
-    16, 17, 18,   # leg 6
-]
+HERE = os.path.dirname(os.path.abspath(__file__))
+SERVER = os.path.normpath(os.path.join(HERE, "..", "Server"))
 
-JOINT_COUNT = len(JOINT_CHANNELS)
+# Reach window for a foot, measured from the coxa pivot in the leg frame. The
+# lower bound is Control.check_point_validity's. Its upper bound of 248 mm is
+# looser than the 233 mm the links can span, and the IK clamps silently past
+# that, so the real limit here is the same 225 mm the circle dance probes with.
+REACH_MIN = 90.0
+REACH_MAX = 225.0
 
-# Servo travel we allow the search to use. The full range is 0..180, but the
-# last few degrees at each end fold a leg into the chassis, where it can jam
-# against the body or a neighbour and stall. Stalled servos are how this
-# hardware dies, so the search never sees those angles.
-JOINT_MIN = 15.0
-JOINT_MAX = 165.0
+# Servo travel the search may use. The last degrees at each end fold a leg into
+# the chassis, where it jams and stalls; stalled servos are how this hardware
+# dies. A pose needing more travel is rejected, never clamped -- clamping would
+# quietly command a different pose from the one being scored.
+JOINT_MIN = 15
+JOINT_MAX = 165
 
-# Beyond this the robot is on its side, not standing. Trials abort rather than
-# leaving it straining against the floor.
+# Beyond this the robot is on its side, not standing.
 TIP_ABORT_DEGREES = 40.0
 
-SERVO_POWER_PIN = 4  # active-high DISABLE: drive low to energise
+# Control's own start-up pose: every foot out at coxa height, body resting on
+# the floor. Every trial ramps out of this and back into it, so no trial
+# depends on what ran before it, and none starts from a pose that already
+# stands.
+REST = [[140.0, 0.0, 0.0] for _ in range(6)]
+
+FRAME_SECONDS = 0.02
 
 
-def clamp(value, low, high):
-    return low if value < low else (high if value > high else value)
+def _install_fake_hardware():
+    """Stub the device modules so Control constructs without a Raspberry Pi.
 
-
-class FakeBackend:
-    """Runs the loop with no hardware, for developing off the robot.
-
-    It does not simulate physics and cannot tell you whether a pose stands.
-    Its only job is to let the harness, the logging and the search be
-    exercised somewhere other than on a live robot.
+    Does not simulate physics. It exists so the loop, the logging and the
+    search can be exercised somewhere other than on a live robot.
     """
+    smbus = types.ModuleType("smbus")
 
-    def __init__(self):
-        self.angles = [90.0] * JOINT_COUNT
+    class SMBus:
+        def __init__(self, bus):
+            pass
 
-    def set_angles(self, angles):
-        self.angles = list(angles)
+        def write_byte_data(self, addr, reg, value):
+            pass
 
-    def read_accel(self):
-        return 0.0, 0.0, 9.8
+        def read_byte_data(self, addr, reg):
+            return 0
 
-    def read_gyro(self):
-        return 0.0, 0.0, 0.0
+    smbus.SMBus = SMBus
+    sys.modules["smbus"] = smbus
 
-    def relax(self):
-        pass
+    gpiozero = types.ModuleType("gpiozero")
 
-    def close(self):
-        pass
+    class OutputDevice:
+        def __init__(self, pin, *args, **kwargs):
+            pass
 
+        def on(self):
+            pass
 
-class HardwareBackend:
-    """The real thing: PCA9685 servos, BCM 4 power rail, MPU6050."""
+        def off(self):
+            pass
 
-    def __init__(self):
-        from gpiozero import OutputDevice
-        from mpu6050 import mpu6050
-        sys.path.insert(0, _server_dir())
-        from servo import Servo
+    gpiozero.OutputDevice = OutputDevice
+    sys.modules["gpiozero"] = gpiozero
 
-        self.power = OutputDevice(SERVO_POWER_PIN)
-        self.power.off()          # low energises the rail
-        self.servo = Servo()
-        self.sensor = mpu6050(address=0x68, bus=1)
-        self.sensor.set_accel_range(mpu6050.ACCEL_RANGE_2G)
-        self.sensor.set_gyro_range(mpu6050.GYRO_RANGE_250DEG)
+    mpu = types.ModuleType("mpu6050")
 
-    def set_angles(self, angles):
-        for channel, angle in zip(JOINT_CHANNELS, angles):
-            self.servo.set_servo_angle(channel, int(round(angle)))
+    class mpu6050:
+        ACCEL_RANGE_2G = 0x00
+        GYRO_RANGE_250DEG = 0x00
 
-    def read_accel(self):
-        data = self.sensor.get_accel_data()
-        return data["x"], data["y"], data["z"]
+        def __init__(self, address=0x68, bus=1):
+            pass
 
-    def read_gyro(self):
-        data = self.sensor.get_gyro_data()
-        return data["x"], data["y"], data["z"]
+        def set_accel_range(self, value):
+            pass
 
-    def relax(self):
-        self.servo.relax()
+        def set_gyro_range(self, value):
+            pass
 
-    def close(self):
-        self.relax()
-        self.power.on()           # high disables the rail
+        def get_accel_data(self):
+            return {"x": 0.0, "y": 0.0, "z": 9.8}
 
+        def get_gyro_data(self):
+            return {"x": 0.0, "y": 0.0, "z": 0.0}
 
-def _server_dir():
-    import os
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.normpath(os.path.join(here, "..", "Server"))
+    mpu.mpu6050 = mpu6050
+    sys.modules["mpu6050"] = mpu
 
 
-def reference_angle(channel):
-    """The angle servo.py holds a channel at while the legs are fitted.
+def _load_control(fake):
+    if fake:
+        _install_fake_hardware()
+    sys.path.insert(0, SERVER)
+    # Control reads point.txt relative to the working directory
+    previous = os.getcwd()
+    os.chdir(SERVER)
+    try:
+        from control import Control
+        return Control()
+    finally:
+        os.chdir(previous)
 
-    This is the mechanical zero the whole robot is referenced to. Used as the
-    pose to return to between trials, not as a starting point for the search --
-    nothing about it is a standing pose.
-    """
-    if channel in (10, 13, 31):
-        return 10.0
-    if channel in (18, 21, 27):
-        return 170.0
-    return 90.0
 
-
-REFERENCE_POSE = [reference_angle(c) for c in JOINT_CHANNELS]
+def reach(position):
+    return math.sqrt(sum(c * c for c in position))
 
 
 class Robot:
-    """Context manager around one backend, with the safety rules applied."""
+    """Context manager around Control, with the safety rules applied.
+
+    Constructing it is a full-authority move: Control calibrates and drives
+    all 18 joints to the rest pose straight away. Support the body.
+    """
 
     def __init__(self, fake=False):
-        self.backend = FakeBackend() if fake else HardwareBackend()
         self.fake = fake
+        self.control = _load_control(fake)
+        self.positions = [list(p) for p in REST]
 
     def __enter__(self):
         return self
@@ -146,42 +147,113 @@ class Robot:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def set_pose(self, angles):
-        """Command 18 joint angles, clamped into the safe travel range."""
-        if len(angles) != JOINT_COUNT:
-            raise ValueError("expected %d angles, got %d" % (JOINT_COUNT, len(angles)))
-        safe = [clamp(float(a), JOINT_MIN, JOINT_MAX) for a in angles]
-        self.backend.set_angles(safe)
-        return safe
+    def wait(self, seconds):
+        if not self.fake:
+            time.sleep(seconds)
 
-    def attitude(self):
-        """Roll and pitch in degrees, from gravity alone.
+    def servo_angles(self, positions):
+        """The 18 servo angles Control.set_leg_angles would write, in leg order.
 
-        Only meaningful when the robot is still -- any real acceleration adds
-        to gravity and tilts the apparent vertical. That is why a trial settles
-        before measuring, and why stillness is part of the score.
+        Mirrors its arithmetic, calibration offsets included, so a pose can be
+        checked without anything being written.
         """
-        ax, ay, az = self.backend.read_accel()
-        roll = math.degrees(math.atan2(ay, az))
-        pitch = math.degrees(math.atan2(-ax, math.sqrt(ay * ay + az * az)))
-        return roll, pitch
+        control = self.control
+        angles = []
+        for leg, (x, y, z) in enumerate(positions):
+            a, b, c = control.coordinate_to_angle(-z, x, y)
+            offset = control.calibration_angles[leg]
+            if leg < 3:
+                angles += [a + offset[0], 90 - (b + offset[1]), c + offset[2]]
+            else:
+                angles += [a + offset[0], 90 + b + offset[1], 180 - (c + offset[2])]
+        return angles
 
-    def motion(self):
+    def violation(self, positions):
+        """Why a pose may not be commanded, or None if it may."""
+        for leg, position in enumerate(positions):
+            distance = reach(position)
+            if not REACH_MIN <= distance <= REACH_MAX:
+                return "leg %d reach %.0f mm" % (leg + 1, distance)
+        for joint, angle in enumerate(self.servo_angles(positions)):
+            if not JOINT_MIN <= angle <= JOINT_MAX:
+                return "leg %d joint %d at %d degrees" % (joint // 3 + 1, joint % 3, angle)
+        return None
+
+    def path(self, target, frames, start=None):
+        """Linear interpolation from start (default: the current pose) to target."""
+        start = self.positions if start is None else start
+        return [[[s + (t - s) * step / frames for s, t in zip(start[leg], target[leg])]
+                 for leg in range(6)]
+                for step in range(1, frames + 1)]
+
+    def path_violation(self, target, frames, start=None):
+        # The reach window is an annulus, so both ends being reachable does not
+        # make the straight line between them reachable
+        for frame in self.path(target, frames, start):
+            problem = self.violation(frame)
+            if problem:
+                return problem
+        return None
+
+    def ramp(self, target, frames=30):
+        """Move to target a little at a time, so every joint arrives together.
+
+        Servos slew at roughly 0.1-0.2 s per 60 degrees, so a jump makes a joint
+        with far to go arrive long after one with little, dragging the robot
+        through poses nobody commanded. A degree or two per frame keeps every
+        servo inside its slew rate. Every frame is checked before the first is
+        sent.
+        """
+        problem = self.path_violation(target, frames)
+        if problem:
+            raise ValueError("refusing to move: " + problem)
+        for frame in self.path(target, frames):
+            self.control.leg_positions = frame
+            self.control.set_leg_angles()
+            self.wait(FRAME_SECONDS)
+        self.positions = [list(p) for p in target]
+
+    def gravity(self):
+        data = self.control.imu.sensor.get_accel_data()
+        return data["x"], data["y"], data["z"]
+
+    def rotation_rate(self):
         """Magnitude of the angular rate, deg/s. Zero when settled."""
-        gx, gy, gz = self.backend.read_gyro()
-        return math.sqrt(gx * gx + gy * gy + gz * gz)
+        data = self.control.imu.sensor.get_gyro_data()
+        return math.sqrt(data["x"] ** 2 + data["y"] ** 2 + data["z"] ** 2)
 
-    def has_tipped(self):
-        roll, pitch = self.attitude()
-        return abs(roll) > TIP_ABORT_DEGREES or abs(pitch) > TIP_ABORT_DEGREES
+    def sample(self, seconds, count):
+        """Mean gravity vector and mean rotation rate over a short window.
 
-    def go_reference(self, settle=1.0):
-        """Return to the assembly reference pose and let it settle."""
-        self.set_pose(REFERENCE_POSE)
-        time.sleep(settle)
+        The gravity reading is only an orientation while the robot is still --
+        any real acceleration adds to it. The rotation rate is what says
+        whether that precondition held.
+        """
+        vectors = []
+        rates = []
+        for _ in range(count):
+            vectors.append(self.gravity())
+            rates.append(self.rotation_rate())
+            self.wait(seconds / count)
+        mean = tuple(sum(v[i] for v in vectors) / count for i in range(3))
+        return mean, sum(rates) / count
 
     def relax(self):
-        self.backend.relax()
+        self.control.servo.relax()
 
     def close(self):
-        self.backend.close()
+        self.relax()
+        self.control.servo_power_disable.on()   # high disables the rail
+
+
+def tilt(vector):
+    """Angle between a gravity reading and the body's vertical, degrees."""
+    x, y, z = vector
+    return math.degrees(math.atan2(math.sqrt(x * x + y * y), z))
+
+
+def angle_between(a, b):
+    """Angle between two gravity readings, degrees."""
+    dot = sum(p * q for p, q in zip(a, b))
+    norms = math.sqrt(sum(p * p for p in a)) * math.sqrt(sum(q * q for q in b))
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot / norms))))

@@ -1,139 +1,145 @@
-"""The standing task: a set of 18 joint angles in, one number out.
+"""The standing task: a candidate foot position in, one number out.
 
-What "standing" means numerically
----------------------------------
-Three things at once, and the interesting part is that no one of them is
-enough on its own:
+The symmetric first stage
+-------------------------
+Every leg is given the same foot position in its own leg frame, so a candidate
+is three numbers: x (out from the coxa), y (swept along the body), z (up). The
+left side gets y mirrored, because a reflection across the body's centreline
+reverses the sense of the leg frame's y axis; without the flip the six feet
+would all sweep the same way round, which is a twist, not a mirror image.
 
-  height    how far the body sits above its feet. Computed from the commanded
-            angles by forward kinematics -- it is what we are *asking* for.
-  level     measured from gravity. It is what tells us the robot actually
-            achieved the pose rather than folding under it.
-  still     measured from the gyro. A pose caught mid-collapse can read level
-            for an instant; one that is level and motionless is holding.
+The hand-written stance at `hexapod_walk --height 40` is exactly (140, 0, -84)
+in this space, so the score it has to beat sits inside the search, not beside
+it.
 
-Maximise height alone and it commands a tall pose it cannot hold. Maximise
-level and still alone and it lies flat on the floor, which is beautifully
-stable and not standing. The product of the three is what has a standing pose
-at its optimum, and nothing in it describes what a standing pose looks like.
+What standing means numerically
+-------------------------------
+A stance you could walk from. After the pose settles, each foot in turn is
+lifted 30 mm and the body's tilt is measured. On N feet the robot is stable
+only while its centre of mass projects inside the support polygon; lifting a
+foot shrinks the polygon, so the tilt it causes measures the stability margin
+directly.
 
-Nothing here tells the robot that legs come in pairs, that six of them should
-cooperate, or which joint bends which way. All of that has to be discovered.
+  height   the foot drop asked for, -z. Unmeasured: it pushes the pose upward.
+  lift     worst tilt across the six lifts. Defines standing.
+  level    tilt of the settled pose against the robot lying at rest.
+  still    rotation rate while settled -- whether the tilt reading is valid.
+
+Height alone is maximised by tucking the feet under the coxas, which is level,
+still and tall and falls over the moment a foot lifts. The lift term is the
+only one that pushes back, and under symmetry it carries even more of the
+weight: a symmetric pose that sags under load sags evenly and stays level.
+
+All six legs are lifted, not one per mirror pair, although symmetry says the
+pairs should agree. They are only equivalent if the robot is mechanically
+symmetric, and this one has never been calibrated. The difference between a
+leg's lift and its mirror's is recorded with every trial, which turns the
+symmetry from an assumption into something measured.
 """
 
-import math
-import time
+from robot import REST, TIP_ABORT_DEGREES, angle_between, tilt
 
-from robot import JOINT_COUNT, JOINT_MIN, JOINT_MAX
+# Search box, leg frame, mm
+BOUNDS = [
+    (80.0, 200.0),     # x: out from the coxa
+    (-50.0, 50.0),     # y: swept along the body
+    (-150.0, -20.0),   # z: up; negative puts the foot below the coxa
+]
+PARAMETER_NAMES = ["x", "y", "z"]
 
-# Link lengths, mm. Same as the IK.
-COXA = 33.0
-FEMUR = 90.0
-TIBIA = 110.0
+# The hand-written stance at hexapod_walk --height 40
+HAND_STANCE = [140.0, 0.0, -84.0]
 
-# Reward weights, in mm per unit so every term is in millimetres and they can
-# simply be added. A 10 degree lean costs 30 mm of height; 20 deg/s of wobble
-# costs 10 mm. Both were chosen so that a pose has to be clearly better on one
-# axis to be worth giving up ground on another.
-TILT_COST_PER_DEGREE = 3.0
+LIFT_MM = 30.0
+
+# Reward weights, in mm per unit, so every term is millimetres and they add.
+# A degree of tilt when a foot lifts costs 4 mm of height, so a pose 20 mm
+# taller must lift its feet with under 5 degrees more wobble to be worth it.
+LIFT_COST_PER_DEGREE = 4.0
+LEVEL_COST_PER_DEGREE = 3.0
 MOTION_COST_PER_DEG_PER_SEC = 0.5
 
-# A trial that ends on its side scores worse than any upright pose, however
-# bad, so the search is never tempted to explore in that direction.
+# A candidate that may not be commanded scores below anything that ran; one
+# that ended on its side scores below anything that stayed up.
+INFEASIBLE_REWARD = -300.0
 TIPPED_REWARD = -200.0
 
-SETTLE_SECONDS = 1.2
-MEASURE_SECONDS = 0.8
-MEASURE_SAMPLES = 12
+RAMP_FRAMES = 30
+LIFT_FRAMES = 8
+SETTLE_SECONDS = 1.0
+LIFT_SETTLE_SECONDS = 0.4
+MEASURE_SECONDS = 0.6
+MEASURE_SAMPLES = 10
 
 
-def servo_to_ik_angles(leg_index, coxa, femur, tibia):
-    """Undo the mapping Control.set_leg_angles applies on the way out.
-
-    Legs 0-2 and 3-5 are mirrored, and not by a clean sign flip: the femur
-    picks up 90 - b on one side and 90 + b on the other, and the tibia is
-    inverted through 180 on the far side only. Assumes zero calibration
-    offsets, which is the case while point.txt holds its nominal values.
-    """
-    if leg_index < 3:
-        return coxa, 90.0 - femur, tibia
-    return coxa, femur - 90.0, 180.0 - tibia
+def feet(candidate):
+    """Six leg-frame foot positions from one shared (x, y, z)."""
+    x, y, z = candidate
+    return [[x, y, z]] * 3 + [[x, -y, z]] * 3
 
 
-def foot_drop(leg_index, coxa, femur, tibia):
-    """How far below the coxa pivot this leg puts its foot, in mm.
-
-    The forward kinematics of Control.angle_to_coordinate. Its first component
-    is the one we want: the IK frame is shuffled relative to the leg frame
-    (the IK is called as coordinate_to_angle(-z, x, y)), so the IK's x axis is
-    the leg frame's negative z -- which is to say, downward.
-    """
-    a, b, c = servo_to_ik_angles(leg_index, coxa, femur, tibia)
-    a = math.radians(a)
-    b = math.radians(b)
-    c = math.radians(c)
-    return TIBIA * math.sin(b + c) + FEMUR * math.sin(b)
+def lifted(positions, leg):
+    raised = [list(p) for p in positions]
+    raised[leg][2] += LIFT_MM
+    return raised
 
 
-def pose_height(angles):
-    """The height a level body could hold on these legs.
-
-    The *minimum* drop across the six legs, not the mean or the maximum. A leg
-    that reaches further down than the others does not lift the body, it just
-    becomes the only one touching -- so the height the robot can actually be
-    supported at is set by its shortest reach. Taking the minimum makes uneven
-    poses score badly without needing a separate evenness term.
-    """
-    drops = []
+def infeasible(robot, positions):
+    """Why this pose cannot be tried, checked before anything moves."""
+    problem = robot.path_violation(positions, RAMP_FRAMES, start=REST)
+    if problem:
+        return problem
     for leg in range(6):
-        coxa, femur, tibia = angles[leg * 3:leg * 3 + 3]
-        drops.append(foot_drop(leg, coxa, femur, tibia))
-    return min(drops)
+        problem = robot.path_violation(lifted(positions, leg), LIFT_FRAMES, start=positions)
+        if problem:
+            return "lifting leg %d: %s" % (leg + 1, problem)
+    return None
 
 
-def random_pose(rng):
-    return [rng.uniform(JOINT_MIN, JOINT_MAX) for _ in range(JOINT_COUNT)]
+def evaluate(robot, candidate, level_reference):
+    """Run one trial. Returns (reward, detail dict).
 
+    level_reference is the gravity vector measured with the robot lying at
+    rest, so an IMU mounted slightly off square does not read as a lean.
+    """
+    positions = feet(candidate)
+    problem = infeasible(robot, positions)
+    if problem:
+        return INFEASIBLE_REWARD, {"infeasible": problem}
 
-def evaluate(robot, angles, verbose=False):
-    """Run one trial. Returns (reward, detail dict)."""
-    applied = robot.set_pose(angles)
-    time.sleep(SETTLE_SECONDS)
+    detail = {"height_mm": round(-candidate[2], 1)}
+    try:
+        robot.ramp(positions, RAMP_FRAMES)
+        robot.wait(SETTLE_SECONDS)
+        base, motion = robot.sample(MEASURE_SECONDS, MEASURE_SAMPLES)
+        level = angle_between(base, level_reference)
+        detail.update(level_deg=round(level, 2), motion_dps=round(motion, 2))
+        if tilt(base) > TIP_ABORT_DEGREES:
+            detail["tipped"] = "settling"
+            return TIPPED_REWARD, detail
 
-    rolls = []
-    pitches = []
-    motions = []
-    interval = MEASURE_SECONDS / MEASURE_SAMPLES
-    for _ in range(MEASURE_SAMPLES):
-        roll, pitch = robot.attitude()
-        rolls.append(roll)
-        pitches.append(pitch)
-        motions.append(robot.motion())
-        time.sleep(interval)
+        lifts = []
+        for leg in range(6):
+            robot.ramp(lifted(positions, leg), LIFT_FRAMES)
+            robot.wait(LIFT_SETTLE_SECONDS)
+            vector, _ = robot.sample(MEASURE_SECONDS / 2, MEASURE_SAMPLES // 2)
+            robot.ramp(positions, LIFT_FRAMES)
+            lifts.append(angle_between(vector, base))
+            if tilt(vector) > TIP_ABORT_DEGREES:
+                detail["tipped"] = "lifting leg %d" % (leg + 1)
+                return TIPPED_REWARD, detail
+    finally:
+        robot.ramp(REST, RAMP_FRAMES)
 
-    mean_roll = sum(rolls) / len(rolls)
-    mean_pitch = sum(pitches) / len(pitches)
-    tilt = math.sqrt(mean_roll ** 2 + mean_pitch ** 2)
-    motion = sum(motions) / len(motions)
-    height = pose_height(applied)
-
-    tipped = tilt > 40.0
-    if tipped:
-        reward = TIPPED_REWARD
-    else:
-        reward = (height
-                  - TILT_COST_PER_DEGREE * tilt
-                  - MOTION_COST_PER_DEG_PER_SEC * motion)
-
-    detail = {
-        "height_mm": round(height, 1),
-        "tilt_deg": round(tilt, 2),
-        "roll_deg": round(mean_roll, 2),
-        "pitch_deg": round(mean_pitch, 2),
-        "motion_dps": round(motion, 2),
-        "tipped": tipped,
-    }
-    if verbose:
-        print("    height %6.1f  tilt %5.2f  motion %6.2f  -> %7.1f"
-              % (height, tilt, motion, reward))
+    worst = max(lifts)
+    detail.update(
+        lift_deg=[round(t, 2) for t in lifts],
+        worst_lift_deg=round(worst, 2),
+        # Legs 1-3 mirror legs 6-4: 0<->5, 1<->4, 2<->3
+        mirror_gap_deg=[round(abs(lifts[i] - lifts[5 - i]), 2) for i in range(3)],
+    )
+    reward = (-candidate[2]
+              - LIFT_COST_PER_DEGREE * worst
+              - LEVEL_COST_PER_DEGREE * level
+              - MOTION_COST_PER_DEG_PER_SEC * motion)
     return reward, detail
