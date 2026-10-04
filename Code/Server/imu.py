@@ -111,7 +111,7 @@ class IMU:
         self.quaternion_w += (-self.quaternion_x * gyro_x - self.quaternion_y * gyro_y - self.quaternion_z * gyro_z) * self.half_time_step
         self.quaternion_x += (self.quaternion_w * gyro_x + self.quaternion_y * gyro_z - self.quaternion_z * gyro_y) * self.half_time_step
         self.quaternion_y += (self.quaternion_w * gyro_y - self.quaternion_x * gyro_z + self.quaternion_z * gyro_x) * self.half_time_step
-        self.quaternion_z += (self.quaternion_w * gyro_z + self.quaternion_x * gyro_y - self.quaternion_y * self.quaternion_x) * self.half_time_step
+        self.quaternion_z += (self.quaternion_w * gyro_z + self.quaternion_x * gyro_y - self.quaternion_y * gyro_x) * self.half_time_step
         
         norm = math.sqrt(self.quaternion_w * self.quaternion_w + self.quaternion_x * self.quaternion_x + self.quaternion_y * self.quaternion_y + self.quaternion_z * self.quaternion_z)
         self.quaternion_w /= norm
@@ -125,7 +125,7 @@ class IMU:
         self.pitch_angle = current_pitch
         self.roll_angle = current_roll
         self.yaw_angle = current_yaw
-        return self.pitch_angle, self.roll_angle, self.yaw_angle
+        return self.roll_angle, self.pitch_angle, self.yaw_angle
 
     def handle_exception(self, exception):
         print(exception)

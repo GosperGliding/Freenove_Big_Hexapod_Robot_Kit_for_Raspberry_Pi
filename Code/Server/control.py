@@ -320,9 +320,17 @@ class Control:
                 break
             time.sleep(0.02)
             roll, pitch, yaw = self.imu.update_imu_state()
-            roll = self.pid_controller.pid_calculate(roll)
+            # One PID instance serves both axes, so its derivative term carries
+            # state from one call into the next and the call order matters.
+            # Pitch goes first, as it always has.
             pitch = self.pid_controller.pid_calculate(pitch)
-            points = self.calculate_posture_balance(roll, pitch, 0)
+            roll = self.pid_controller.pid_calculate(roll)
+            # calculate_posture_balance's parameters are crossed: its `roll`
+            # drives the Y rotation (physical pitch) and its `pitch` drives the
+            # X rotation (physical roll). Pass them swapped rather than renaming,
+            # because this function is the reference the bit-exact C++ port is
+            # measured against.
+            points = self.calculate_posture_balance(pitch, roll, 0)
             self.transform_coordinates(points)
             self.set_leg_angles()
 
