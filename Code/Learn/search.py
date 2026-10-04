@@ -66,12 +66,16 @@ def main():
     parser.add_argument("--method", choices=["random", "cmaes"], default="random")
     parser.add_argument("--fake", action="store_true",
                         help="run the loop with no hardware; does not simulate physics")
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="repeat an earlier run's candidates (default: a fresh seed each run)")
     parser.add_argument("--out", default="trials.jsonl")
     parser.add_argument("--repeats", type=int, default=3,
                         help="runs of the hand stance first, to measure noise (0 skips)")
     options = parser.parse_args()
 
+    if options.seed is None:
+        options.seed = random.SystemRandom().randrange(1, 1000000)
+    print("seed %d (pass --seed %d to repeat these candidates)" % (options.seed, options.seed))
     rng = random.Random(options.seed)
     if options.method == "cmaes":
         try:
@@ -96,7 +100,8 @@ def main():
         def run(candidate, label):
             nonlocal best, trial
             reward, detail = stand.evaluate(robot, candidate, level_reference)
-            record = {"trial": trial, "label": label, "reward": round(reward, 2),
+            record = {"trial": trial, "seed": options.seed, "label": label,
+                      "reward": round(reward, 2),
                       "candidate": [round(c, 1) for c in candidate]}
             record.update(detail)
             log_trial(log, record)
