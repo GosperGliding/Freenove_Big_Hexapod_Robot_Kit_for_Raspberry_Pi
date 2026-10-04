@@ -61,6 +61,16 @@ FRAME_SECONDS = 0.02
 # How often a watched ramp checks the body against the path it should follow
 WATCH_EVERY = 5
 
+# A ramp's path is checked at least this finely, however few frames it is
+# sent in: a fast ramp sweeps the servos through the poses between its frames
+# too, and foot reach is not convex in joint space.
+PATH_CHECK_STEPS = 40
+
+# The fastest any joint may be driven, deg/s. Part of the safety cage: hobby
+# servos slew roughly 300-600 deg/s unloaded and slower under load, and past
+# that the joints stop arriving together. A judgement with a margin.
+MAX_JOINT_DEG_PER_SEC = 250.0
+
 COXA, FEMUR, TIBIA = 33.0, 90.0, 110.0
 
 
@@ -221,6 +231,10 @@ class Robot:
         self.fake = fake
         self.backend = FakeBackend() if fake else HardwareBackend()
         self.pose = [STRAIGHT] * 6
+        # Commanded time: the sum of every wait. I2C writes add real time on
+        # top, which this leaves out, so it reads the same with or without
+        # hardware.
+        self.elapsed = 0.0
         # Pulses first, then power, so the servos wake up already commanded
         # to straight rather than to whatever the PCA9685s last held
         self.backend.write(self.pose)
@@ -233,6 +247,7 @@ class Robot:
         self.backend.close()
 
     def wait(self, seconds):
+        self.elapsed += seconds
         if not self.fake:
             time.sleep(seconds)
 
@@ -264,7 +279,7 @@ class Robot:
                 return problem
         return None
 
-    def ramp(self, target, frames=30, watch=None):
+    def ramp(self, target, frames=30, watch=None, done=None, check_every=10):
         """Move to target a little at a time, so every joint arrives together.
 
         Servos slew at roughly 0.1-0.2 s per 60 degrees, so a jump makes a joint
@@ -277,8 +292,11 @@ class Robot:
         sent and returns a reason to stop or None. On a reason the ramp halts
         where it is -- no further push against whatever is in the way -- and
         raises Impeded; self.pose is left at the last frame sent.
+
+        done, if given, is called every check_every frames and returns True to
+        end the ramp there, short of target. Returns whether it did.
         """
-        problem = self.path_violation(target, frames)
+        problem = self.path_violation(target, max(frames, PATH_CHECK_STEPS))
         if problem:
             raise ValueError("refusing to move: " + problem)
         for step, frame in enumerate(self.path(target, frames), 1):
@@ -289,7 +307,11 @@ class Robot:
                 reason = watch(frame, step)
                 if reason:
                     raise Impeded(reason)
+            if done is not None and step % check_every == 0 and step < frames:
+                if done(frame):
+                    return True
         self.pose = [tuple(j) for j in target]
+        return False
 
     def rotation_rate(self):
         """Magnitude of the angular rate, deg/s. Zero when settled."""

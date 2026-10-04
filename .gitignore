@@ -22,8 +22,9 @@ Code/Cpp/test/*.trace
 # Runtime config written by parameter.py
 Code/Server/params.json
 
-# Learning experiment logs
+# Learning experiment logs, and the landscapes drawn from them
 Code/Learn/*.jsonl
+Code/Learn/*.html
 
 # Python virtual environments
 .venv/

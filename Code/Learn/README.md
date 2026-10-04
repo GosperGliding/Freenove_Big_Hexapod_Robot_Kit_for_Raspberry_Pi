@@ -12,18 +12,19 @@ accelerometer cannot be integrated over a trial without drifting, the
 ultrasonic only sees forward, and the camera is dead. Standing is static, so
 the accelerometer measures orientation exactly and a trial takes seconds.
 
-## Stage 1: three joint angles, shared by every leg
+## Stage 1: three joint angles and a speed, shared by every leg
 
 A candidate is three angles, each an offset from the legs-straight pose that
-`servo.py` holds while the horns are fitted:
+`servo.py` holds while the horns are fitted, and how fast to move:
 
 | | range | |
 |---|---|---|
 | hip | -20..+20 | swings the leg along the body |
 | knee | -60..+45 | raises (−) or lowers (+) the thigh |
 | ankle | 0..140 | bends the shin down from straight |
+| speed | 0.1..1.0 | the fastest joint, as a share of 250°/s |
 
-Every leg gets the same three, with the hip mirrored on the left so the two
+Every leg gets the same three angles, with the hip mirrored on the left so the two
 sides are reflections rather than a twist. Servos are written directly: no IK,
 no foot coordinates, and no `point.txt` offsets, since the straight pose
 bypasses those too.
@@ -32,15 +33,60 @@ Later stages relax the symmetry: per mirror pair, then per leg.
 
 ## How a trial moves
 
-Every trial starts with the legs straight, ramps to the candidate over 40
-frames in joint space, runs its measurements, and ramps back to straight.
-Ramping keeps every servo inside its slew rate, so the robot is not dragged
-through poses nobody asked for and scored on the transition. Starting from the
-same pose each time makes trials independent of their order.
+Every trial starts with the legs straight and ramps towards the candidate in
+joint space at the candidate's speed. Every 10 frames it stops and checks
+whether it is standing; the first check that passes ends the trial there,
+short of the candidate if need be. If none does, the candidate pose gets a
+last check. Then it ramps back to straight.
 
-Every frame is checked before the first is sent: each servo within 5-175
-degrees, and no foot folded closer than 90 mm to its hip. A candidate that
-fails is logged as skipped and nothing moves.
+Ramping keeps every servo inside its slew rate, so the robot is not dragged
+through poses nobody asked for and scored on the transition. That is why the
+fastest joint is capped at 250°/s: hobby servos slew roughly 300-600°/s
+unloaded and slower under load. The cap is part of the safety cage, a
+judgement with a margin. Starting from straight each time makes trials
+independent of their order.
+
+Every move's path is checked before the first frame is sent, at 40 steps
+however few frames it is sent in: each servo within 5-175 degrees, and no
+foot folded closer than 90 mm to its hip. A candidate that fails is logged
+as skipped and nothing moves.
+
+## When the robot is standing
+
+A check holds the pose and tests three gates, cheapest first:
+
+| gate | passes when |
+|---|---|
+| still | gyro under 5°/s, after 0.5 s to settle |
+| level | within 5° of the robot lying straight-legged |
+| supported | the support nudge pitches the body (below) |
+
+With `--use-model` there is a fourth: the commanded height must be at least
+`--target-height`, 120 mm by default -- about the tallest hand-written stance.
+Checks only start once a frame reaches it, and candidates whose own pose
+falls short are skipped without moving. Without the model nothing measures
+height, so there is no target, and the trial ends at the first checkpoint
+that stands, however low.
+
+On a stand:
+
+```
+reward = (height − 3·level − 0.5·still) × exp(−time / 2 s)    with --use-model
+reward = (100    − 3·level − 0.5·still) × exp(−time / 2 s)    measured only
+```
+
+`height` is the commanded height in mm of the frame that stood. Since a
+trial ends at the first stand at or above the target, it is the target plus
+however far the last 10 frames overshot it -- so it mostly rewards covering
+more height between checks, and taller standing comes mainly from raising
+`--target-height`.
+
+`time` is commanded time from the first frame to the start of the check that
+passed, counting the pauses for any checks that failed before it. Lean and
+wobble both gate the stand and still cost within it; time decays the whole,
+so a stand reached in 0.5 s keeps 78% and one taking 2 s keeps 37%. Failures
+are not decayed: a decay would bring a slow failure closer to zero than a fast
+one.
 
 ## Two modes: measured only, or with the model
 
@@ -54,10 +100,9 @@ kinematics the simulator runs.
 | | measured only (default) | `--use-model` |
 |---|---|---|
 | supported? | body pitches ≥ 1° when the knees are nudged | body pitches ≥ half what forward kinematics predicts |
-| reward if supported | 100 − 3·level − 0.5·still | height − 3·level − 0.5·still |
-| height | not known, not rewarded | from forward kinematics of the commanded angles |
-| noise check | first random pose that can be tried, 3 times | the hand-written stance, 3 times |
-| skipped as unreadable | — | poses predicted to pitch under 1.5° |
+| height | not known; no target | from forward kinematics; a stand must reach `--target-height` |
+| noise check | first random pose that can be tried, 3 times | the hand-written stance, 3 times, at its own height |
+| a check cannot be read | — | where the nudge is predicted to pitch under 1.5° |
 
 Not supported scores −150, tipped −200, impeded −250, skipped or restricted
 −300 in both modes.
@@ -70,8 +115,9 @@ not measured, so a pose the servos cannot hold sags evenly onto the floor,
 still level and still, while height reports the full commanded value.
 
 **What measured-only cannot do.** Nothing on the robot measures height, so
-every supported pose earns the same 100, less lean and wobble: the search
-learns which poses stand, not which stand tallest. It can also call a
+the first checkpoint that stands ends the trial, however low: with time the
+only thing optimised, the search learns to stand as early as it can, not as
+tall. It can also call a
 genuinely standing pose unsupported where the knee nudge happens to barely
 move the feet, which the model would have predicted and skipped. Both are the
 price of assuming nothing. A measured height -- the head's ultrasonic pointed
@@ -127,7 +173,8 @@ python combine.py wood.jsonl tile.jsonl
 ```
 
 The same `--seed` draws the same candidates in either mode, so the runs line
-up pose for pose. `combine.py` ranks poses by their worst reward and counts
+up pose for pose; without `--seed`, every trial is seeded independently and
+two runs share no poses. `combine.py` ranks poses by their worst reward and counts
 those that stood on every surface; it refuses to mix `--use-model` and
 measured-only logs, whose rewards are on different scales. This works for
 random search only: CMA-ES picks candidates from the rewards it sees, so it
@@ -146,14 +193,33 @@ From this directory, Python server stopped (it holds BCM 4):
 python search.py --fake --trials 20         # no hardware; checks the loop only
 python search.py --trials 100               # on the robot, measured only
 python search.py --trials 100 --use-model   # on the robot, with the model
+python search.py --trials 100 --use-model --target-height 140
 ```
 
-Trials take roughly 4 s, so 100 is under 10 minutes. Each run starts with
-three repeats of one pose; if their spread exceeds 15 the harness warns,
-because a search cannot climb noise. Every run draws a fresh seed and prints
-it; `--seed N` repeats a run's candidates exactly. With three parameters random search
-covers the box well; `--method cmaes` (`uv pip install cma`) matters more once
-the symmetry is relaxed.
+A trial takes 2-10 s, depending on speed and on how many checks fail before
+one passes; with the model, the ~80% of candidates that cannot reach 120 mm
+cost nothing. Each run starts with three repeats of one pose; if their spread
+exceeds 15 the harness warns, because a search cannot climb noise.
+
+Every trial starts from a seed of its own, logged as `trial_seed`, which
+regenerates that trial's pose. By default each comes straight from the
+operating system, so no trial depends on another and no run repeats. With
+`--seed N` they are drawn from N instead, so the run can be repeated exactly
+-- which is what lining up surfaces with `combine.py` needs. With four parameters random search covers the box well; `--method
+cmaes` (`uv pip install cma`) matters more once the symmetry is relaxed.
+
+To see what a run found:
+
+```bash
+python landscape.py trials.jsonl              # writes landscape.html
+python landscape.py wood.jsonl tile.jsonl     # one section per log
+```
+
+One dot per trial, coloured by outcome and reward, in two views -- knee
+against ankle, as in the simulator, and hip against speed. Unlike the
+simulator's heatmap it shows only poses the robot actually tried: there is
+no model filling in the gaps. Hover over a dot for its trial. Standard
+library only, so it runs on the Pi.
 
 `--fake` does not simulate physics. Its accelerometer reads the plane under
 the commanded feet, enough to exercise the loop, the checks and the logging.
