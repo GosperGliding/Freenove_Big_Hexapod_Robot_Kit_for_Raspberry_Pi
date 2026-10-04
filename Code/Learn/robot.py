@@ -26,6 +26,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.normpath(os.path.join(HERE, "..", "Server"))
+MPU6050_SOURCE = os.path.normpath(os.path.join(HERE, "..", "Libs", "mpu6050"))
 
 # Servo channels per leg, (hip, knee, ankle), from Control.set_leg_angles.
 # Leg 3's ankle is on the other PCA9685.
@@ -143,10 +144,12 @@ class HardwareBackend:
 
     def __init__(self):
         from gpiozero import OutputDevice
-        # The class lives in the package's submodule. Importing it from there
-        # also works on installs whose __init__.py lost its re-export, which
-        # setup.py install produces under setuptools 80+.
-        from mpu6050.mpu6050 import mpu6050
+        # The IMU driver is loaded from the copy bundled in Code/Libs, not the
+        # system install. setup.py install under setuptools 80+ leaves a hollow
+        # egg on the Pi -- both the package's re-export and the class itself
+        # are missing -- while the bundled copy arrives intact with git pull.
+        sys.path.insert(0, MPU6050_SOURCE)
+        from mpu6050 import mpu6050
         sys.path.insert(0, SERVER)
         from servo import Servo
 
