@@ -41,10 +41,37 @@ link lengths, which is what the simulator runs too:
 
 The hand-written stance at `hexapod_walk --height 40`, (0, -15.5, +84.9) in
 this space, is only used as a baseline in that mode.
+
+Impeded motion
+--------------
+Nothing reads a joint back, so a leg dragging on a high-friction floor, a
+foot that sticks, or a leg caught on something cannot be seen at the joint.
+It shows in the body instead: a leg that cannot follow its command makes the
+body move other than the command says it should. So every ramp is watched,
+every few frames, against the orientation the body should have:
+
+  measured only   a mirror-symmetric command should not turn the body at all,
+                  which follows from the command, not from any model. The
+                  support nudge is not watched: its size is unknown here.
+  with the model  the turn forward kinematics predicts at that frame, which
+                  also catches the body pitching less than it should during
+                  the support nudge.
+
+More than IMPEDED_DEGREES off and the ramp stops where it is, so nothing goes
+on pushing, the robot ramps back to straight, and the trial scores as
+impeded. search.py then skips poses close to it for the rest of the run: the
+restricted region, grown from what the robot ran into rather than set in
+advance, and so particular to the surface it is on.
+
+The friction a pose would need if each leg pushed like a strut along the line
+from foot to hip is logged beside it with the model, to see whether it
+predicts which poses are impeded.
 """
 
-from robot import (STRAIGHT, TIP_ABORT_DEGREES, angle_between, floor_normal,
-                   leg_geometry, tilt)
+import math
+
+from robot import (STRAIGHT, TIP_ABORT_DEGREES, Impeded, angle_between,
+                   floor_normal, leg_geometry, rotate_like, tilt)
 
 # Search box, degrees from straight. Part of the safety cage: the hip range is
 # what keeps the front and rear pairs from swinging into each other.
@@ -71,14 +98,23 @@ SUPPORT_MIN_MEASURED_DEGREES = 1.0
 SUPPORT_MIN_RATIO = 0.5
 SUPPORT_MIN_PREDICTED_DEGREES = 1.5
 
+# How far the body may stray from the orientation its command should give
+# before a ramp counts as impeded. Above the accelerometer's noise and the
+# apparent tilt a slow ramp's own acceleration adds; below the 40 degree tip.
+IMPEDED_DEGREES = 8.0
+WATCH_SECONDS = 0.03
+WATCH_SAMPLES = 3
+
 # Reward weights. With the model they are mm per unit, so each term is in mm
 # alongside height; measured only, they are points against STOOD_REWARD.
 LEVEL_COST_PER_DEGREE = 3.0
 MOTION_COST_PER_DEG_PER_SEC = 0.5
 STOOD_REWARD = 100.0
 
-# Below anything that stood: infeasible (nothing moved) < tipped < unsupported
+# Below anything that stood. Skipped or restricted (nothing moved) < impeded
+# (stopped partway) < tipped < unsupported.
 INFEASIBLE_REWARD = -300.0
+IMPEDED_REWARD = -250.0
 TIPPED_REWARD = -200.0
 UNSUPPORTED_REWARD = -150.0
 
@@ -116,6 +152,22 @@ def predicted_pitch(pose):
     return angle_between(floor_normal(pose), floor_normal(pitched(pose)))
 
 
+def friction_needed(pose):
+    """Worst foot's horizontal-to-vertical ratio from hip to foot. Model mode only.
+
+    The friction coefficient a foot would need if its leg pushed like a strut
+    along that line. Servo-held legs are not struts, so this is a guess to be
+    checked against which poses are actually impeded, not a fact.
+    """
+    worst = 0.0
+    for joints_of_leg in pose:
+        x, y, z = leg_geometry(joints_of_leg)
+        if z >= 0:
+            return None            # a foot at or above its hip pushes nothing
+        worst = max(worst, math.hypot(x, y) / -z)
+    return worst
+
+
 def infeasible(robot, pose, use_model=False):
     """Why this pose cannot be tried, checked before anything moves."""
     straight = [STRAIGHT] * 6
@@ -132,6 +184,26 @@ def infeasible(robot, pose, use_model=False):
     return None
 
 
+def watcher(robot, name, use_model):
+    """A ramp watch: the body's turn since the ramp began against the turn
+    its command should give. Measured only, that is no turn at all."""
+    start_gravity, _ = robot.sample(WATCH_SECONDS, WATCH_SAMPLES)
+    start_pose = [tuple(j) for j in robot.pose]
+    start_normal = floor_normal(start_pose) if use_model else None
+
+    def watch(frame, step):
+        gravity, _ = robot.sample(WATCH_SECONDS, WATCH_SAMPLES)
+        expected = start_gravity
+        if use_model:
+            expected = rotate_like(start_gravity, start_normal, floor_normal(frame))
+        off = angle_between(gravity, expected)
+        if off > IMPEDED_DEGREES:
+            return "%s, step %d: body %.1f degrees off its expected path" % (name, step, off)
+        return None
+
+    return watch
+
+
 def evaluate(robot, candidate, level_reference, use_model=False):
     """Run one trial. Returns (reward, detail dict).
 
@@ -146,9 +218,11 @@ def evaluate(robot, candidate, level_reference, use_model=False):
 
     detail = {}
     if use_model:
-        detail["height_mm"] = round(height(pose), 1)
+        needed = friction_needed(pose)
+        detail.update(height_mm=round(height(pose), 1),
+                      friction_needed=None if needed is None else round(needed, 2))
     try:
-        robot.ramp(pose, RAMP_FRAMES)
+        robot.ramp(pose, RAMP_FRAMES, watcher(robot, "standing up", use_model))
         robot.wait(SETTLE_SECONDS)
         base, motion = robot.sample(MEASURE_SECONDS, MEASURE_SAMPLES)
         level = angle_between(base, level_reference)
@@ -157,13 +231,21 @@ def evaluate(robot, candidate, level_reference, use_model=False):
             detail["tipped"] = "settling"
             return TIPPED_REWARD, detail
 
-        robot.ramp(pitched(pose), TILT_FRAMES)
+        # The nudge's size is only known with the model, so only then watched
+        nudge_watch = watcher(robot, "support nudge", True) if use_model else None
+        robot.ramp(pitched(pose), TILT_FRAMES, nudge_watch)
         robot.wait(TILT_SETTLE_SECONDS)
         vector, _ = robot.sample(MEASURE_SECONDS / 2, MEASURE_SAMPLES // 2)
-        robot.ramp(pose, TILT_FRAMES)
+        back_watch = watcher(robot, "nudge back", True) if use_model else None
+        robot.ramp(pose, TILT_FRAMES, back_watch)
         measured = angle_between(vector, base)
         detail["support_measured_deg"] = round(measured, 2)
+    except Impeded as stopped:
+        detail["impeded"] = str(stopped)
+        return IMPEDED_REWARD, detail
     finally:
+        # From wherever it stopped. Not watched: if the way back is impeded
+        # too, stopping halfway would leave the robot stranded mid-pose.
         robot.ramp([STRAIGHT] * 6, RAMP_FRAMES)
 
     if use_model:

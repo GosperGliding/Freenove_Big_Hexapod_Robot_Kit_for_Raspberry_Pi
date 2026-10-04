@@ -50,9 +50,22 @@ REACH_MIN = 90.0
 # Beyond this the robot is on its side, not standing.
 TIP_ABORT_DEGREES = 40.0
 
+# ADS7830 channels for the two battery packs, and the voltages below which
+# server.py raises its low-battery alarm -- used here to stop a run before a
+# sagging pack browns out the Pi mid-move.
+BATTERY_CHANNELS = (0, 4)
+BATTERY_MIN_VOLTS = (5.5, 6.0)
+
 FRAME_SECONDS = 0.02
 
+# How often a watched ramp checks the body against the path it should follow
+WATCH_EVERY = 5
+
 COXA, FEMUR, TIBIA = 33.0, 90.0, 110.0
+
+
+class Impeded(Exception):
+    """A watched ramp found the body off the path its command should give."""
 
 # Each leg's mounting angle and hip offset, as Control.transform_coordinates
 # applies them between the body frame and the leg frame
@@ -129,6 +142,9 @@ class FakeBackend:
     def read_gyro(self):
         return 0.0, 0.0, 0.0
 
+    def read_battery(self):
+        return 7.4, 7.4
+
     def energise(self):
         pass
 
@@ -162,6 +178,13 @@ class HardwareBackend:
         self.sensor.set_accel_range(mpu6050.ACCEL_RANGE_2G)
         self.sensor.set_gyro_range(mpu6050.GYRO_RANGE_250DEG)
         self.servo = Servo()
+        from adc import ADC
+        self.adc = ADC()
+
+    def read_battery(self):
+        # Both packs, as server.py reads them. Which one feeds the servos is
+        # not documented, so both are kept and the caller decides.
+        return tuple(self.adc.read_channel_voltage(c) for c in BATTERY_CHANNELS)
 
     def energise(self):
         self.power.off()          # low enables the rail
@@ -241,7 +264,7 @@ class Robot:
                 return problem
         return None
 
-    def ramp(self, target, frames=30):
+    def ramp(self, target, frames=30, watch=None):
         """Move to target a little at a time, so every joint arrives together.
 
         Servos slew at roughly 0.1-0.2 s per 60 degrees, so a jump makes a joint
@@ -249,13 +272,23 @@ class Robot:
         through poses nobody commanded. A few degrees per frame keeps every
         servo inside its slew rate. Every frame is checked before the first is
         sent.
+
+        watch, if given, is called every WATCH_EVERY frames with the frame just
+        sent and returns a reason to stop or None. On a reason the ramp halts
+        where it is -- no further push against whatever is in the way -- and
+        raises Impeded; self.pose is left at the last frame sent.
         """
         problem = self.path_violation(target, frames)
         if problem:
             raise ValueError("refusing to move: " + problem)
-        for frame in self.path(target, frames):
+        for step, frame in enumerate(self.path(target, frames), 1):
             self.backend.write(frame)
+            self.pose = frame
             self.wait(FRAME_SECONDS)
+            if watch is not None and (step % WATCH_EVERY == 0 or step == frames):
+                reason = watch(frame, step)
+                if reason:
+                    raise Impeded(reason)
         self.pose = [tuple(j) for j in target]
 
     def rotation_rate(self):
@@ -279,6 +312,19 @@ class Robot:
         mean = tuple(sum(v[i] for v in vectors) / count for i in range(3))
         return mean, sum(rates) / count
 
+    def battery(self, count=10):
+        """Mean voltage of each pack over a few readings.
+
+        The ADS7830 is 8-bit through a 3:1 divider, so one step is about
+        59 mV; averaging recovers a little of what a single reading rounds off.
+        """
+        readings = [self.backend.read_battery() for _ in range(count)]
+        return tuple(sum(r[i] for r in readings) / count for i in range(len(readings[0])))
+
+    def battery_low(self):
+        volts = self.battery()
+        return any(v < limit for v, limit in zip(volts, BATTERY_MIN_VOLTS)), volts
+
     def relax(self):
         self.backend.relax()
 
@@ -297,3 +343,24 @@ def angle_between(a, b):
     dot = sum(p * q for p, q in zip(a, b))
     norms = math.sqrt(sum(p * p for p in a)) * math.sqrt(sum(q * q for q in b))
     return math.degrees(math.acos(max(-1.0, min(1.0, dot / norms))))
+
+
+def rotate_like(v, a, b):
+    """Rotate v by the rotation that takes direction a onto direction b.
+
+    Rodrigues' formula about the axis a x b. Used to carry a gravity reading
+    through the turn the model predicts, to get the reading to expect.
+    """
+    na = math.sqrt(sum(c * c for c in a))
+    nb = math.sqrt(sum(c * c for c in b))
+    a = [c / na for c in a]
+    b = [c / nb for c in b]
+    axis = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    s = math.sqrt(sum(c * c for c in axis))
+    cos = sum(p * q for p, q in zip(a, b))
+    if s < 1e-12:
+        return list(v)
+    k = [c / s for c in axis]
+    dot = sum(p * q for p, q in zip(k, v))
+    cross = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]]
+    return [v[i] * cos + cross[i] * s + k[i] * dot * (1 - cos) for i in range(3)]

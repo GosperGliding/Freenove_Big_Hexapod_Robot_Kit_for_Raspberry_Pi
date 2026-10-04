@@ -29,8 +29,14 @@ import random
 import sys
 import time
 
-from robot import TIP_ABORT_DEGREES, Robot, angle_between
+from robot import BATTERY_MIN_VOLTS, TIP_ABORT_DEGREES, Robot, angle_between
 import stand
+
+
+class LowBattery(Exception):
+    def __init__(self, volts):
+        super().__init__(volts)
+        self.volts = volts
 
 
 def log_trial(handle, record):
@@ -48,6 +54,18 @@ def needs_a_hand(robot, level_reference):
     return angle_between(vector, level_reference) > TIP_ABORT_DEGREES
 
 
+# Poses within this many degrees, on every joint, of one that was impeded are
+# skipped for the rest of the run. Nearby poses share most of their path.
+RESTRICT_DEGREES = 5.0
+
+
+def near_impeded(candidate, impeded):
+    for other in impeded:
+        if all(abs(a - b) <= RESTRICT_DEGREES for a, b in zip(candidate, other)):
+            return other
+    return None
+
+
 def to_box(unit):
     return [low + u * (high - low) for u, (low, high) in zip(unit, stand.BOUNDS)]
 
@@ -55,6 +73,10 @@ def to_box(unit):
 def summary(reward, detail):
     if "infeasible" in detail:
         return "%7.1f   skipped, %s" % (reward, detail["infeasible"])
+    if "restricted" in detail:
+        return "%7.1f   restricted, %s" % (reward, detail["restricted"])
+    if "impeded" in detail:
+        return "%7.1f   impeded, %s" % (reward, detail["impeded"])
     if "tipped" in detail:
         return "%7.1f   tipped while %s" % (reward, detail["tipped"])
     line = "%7.1f   " % reward
@@ -84,6 +106,9 @@ def main():
     parser.add_argument("--use-model", action="store_true",
                         help="score with the robot's geometry: forward-kinematics height, "
                              "predicted support pitch, and the hand stance as the noise baseline")
+    parser.add_argument("--surface", default="unlabelled",
+                        help="what the robot is standing on, recorded with every trial; "
+                             "run the same --seed on several surfaces, then combine.py")
     options = parser.parse_args()
     use_model = options.use_model
     print("mode: %s" % ("with the model (forward kinematics, hand-stance baseline)"
@@ -112,17 +137,42 @@ def main():
     with Robot(fake=options.fake) as robot, open(options.out, "w") as log:
         robot.wait(1.5)
         level_reference, _ = robot.sample(1.0, 20)
+        low, volts = robot.battery_low()
+        print("surface: %s   battery: %s V" % (options.surface,
+                                               " / ".join("%.2f" % v for v in volts)))
+        if low:
+            print("Battery below %s V before starting. Charge it first."
+                  % " / ".join("%.1f" % v for v in BATTERY_MIN_VOLTS))
+            return 1
+
+        # Poses this run found impeded. Kept for this run only, so every run
+        # starts from nothing and a new surface is not judged by an old one.
+        impeded = []
 
         def run(candidate, label):
             nonlocal best, trial
-            reward, detail = stand.evaluate(robot, candidate, level_reference, use_model)
+            # A flat pack can brown out the Pi mid-move, so stop cleanly first
+            low, volts = robot.battery_low()
+            if low:
+                raise LowBattery(volts)
+            near = near_impeded(candidate, impeded)
+            if near is not None:
+                reward = stand.INFEASIBLE_REWARD
+                detail = {"restricted": "within %.0f degrees of impeded %s"
+                          % (RESTRICT_DEGREES, " ".join("%.1f" % c for c in near))}
+            else:
+                reward, detail = stand.evaluate(robot, candidate, level_reference, use_model)
+                if "impeded" in detail:
+                    impeded.append(list(candidate))
             record = {"trial": trial, "seed": options.seed, "use_model": use_model,
+                      "surface": options.surface,
                       "label": label, "reward": round(reward, 2),
                       "candidate": [round(c, 1) for c in candidate]}
             record.update(detail)
             log_trial(log, record)
             marker = ""
             if (label == "search" and "infeasible" not in detail
+                    and "restricted" not in detail
                     and (best is None or reward > best[0])):
                 best = (reward, list(candidate))
                 marker = "  <- best"
@@ -148,9 +198,13 @@ def main():
                 if use_model:
                     pose, label = stand.HAND_STANCE, "hand"
                 else:
-                    pose, label = random_candidate(), "repeat"
+                    # Its own stream, so the search draws the same candidates
+                    # for a given seed whatever the mode
+                    picker = random.Random("repeat-%d" % options.seed)
+                    draw = lambda: to_box([picker.random() for _ in stand.BOUNDS])
+                    pose, label = draw(), "repeat"
                     while stand.infeasible(robot, stand.joints(pose)):
-                        pose = random_candidate()
+                        pose = draw()
                 results = [run(pose, label) for _ in range(options.repeats)]
                 rewards = [r for r, _ in results]
                 pitches = [d["support_measured_deg"] for _, d in results
@@ -182,6 +236,10 @@ def main():
                         optimiser.tell(batch, losses)
         except KeyboardInterrupt:
             print("\ninterrupted")
+        except LowBattery as stopped:
+            print("\nstopped: battery at %s V, below %s V. Charge it and rerun with --seed %d."
+                  % (" / ".join("%.2f" % v for v in stopped.volts),
+                     " / ".join("%.1f" % v for v in BATTERY_MIN_VOLTS), options.seed))
 
     elapsed = time.time() - started
     print("\n%d trials in %.0f s (%.1f s each)" % (trial, elapsed, elapsed / max(trial, 1)))

@@ -59,7 +59,8 @@ kinematics the simulator runs.
 | noise check | first random pose that can be tried, 3 times | the hand-written stance, 3 times |
 | skipped as unreadable | — | poses predicted to pitch under 1.5° |
 
-Not supported scores −150, tipped −200, skipped −300 in both modes.
+Not supported scores −150, tipped −200, impeded −250, skipped or restricted
+−300 in both modes.
 
 **The support check.** The front knees go down and the rear knees up by 6
 degrees, and the accelerometer measures how far the body pitches. A body
@@ -83,8 +84,59 @@ they can be set from real runs and rewards recomputed afterwards.
 Not checked at this stage: whether the stance has margin to lift a foot. That
 matters for walking, not standing, and comes back with the walking stage.
 
-Not checked at this stage: whether the stance has margin to lift a foot. That
-matters for walking, not standing, and comes back with the walking stage.
+## Impeded motion: the restricted region grows
+
+Nothing reads a joint back, so a leg dragging on a high-friction floor, a
+foot that sticks, or a leg caught on something is invisible at the joint. It
+shows in the body: a leg that cannot follow its command makes the body move
+other than the command says. So every ramp is watched every 5 frames against
+the orientation the body should have by then:
+
+| | expected orientation | ramps watched |
+|---|---|---|
+| measured only | unchanged: a mirror-symmetric command should not turn the body, which follows from the command, not a model | standing up |
+| `--use-model` | the turn forward kinematics predicts at that frame | standing up, the support nudge and back |
+
+More than 8° off and the ramp stops where it is, so nothing goes on pushing
+against whatever is in the way; the robot ramps back to straight, and the
+trial scores −250, impeded. For the rest of the run, poses within 5° on every
+joint of an impeded one are skipped without moving, logged as restricted. So
+the restricted region is the safety cage plus what the robot itself ran into
+-- kept for one run only, so each run and each surface starts from nothing.
+
+What it cannot see: an impediment that holds every leg back equally. A
+symmetric stand-up that stalls stays level, and the accelerometer cannot tell
+a body that failed to rise from one that rose. The support check catches the
+worst of it, a body left on its belly. The support nudge is small, about 4°,
+so a body that pitches less than it should there is caught by the support
+check (unsupported) rather than the watch.
+
+Energy is not in the reward. The battery packs are still read on the ADS7830,
+but only to stop a run cleanly when either drops below the 5.5 / 6.0 V at
+which `server.py` raises its low-battery alarm.
+
+## Surfaces
+
+Friction is not measurable here either, so robustness is measured directly:
+run the same candidates on each surface and keep the worst result.
+
+```bash
+python search.py --trials 100 --seed 4242 --surface wood --out wood.jsonl
+python search.py --trials 100 --seed 4242 --surface tile --out tile.jsonl
+python combine.py wood.jsonl tile.jsonl
+```
+
+The same `--seed` draws the same candidates in either mode, so the runs line
+up pose for pose. `combine.py` ranks poses by their worst reward and counts
+those that stood on every surface; it refuses to mix `--use-model` and
+measured-only logs, whose rewards are on different scales. This works for
+random search only: CMA-ES picks candidates from the rewards it sees, so it
+wanders differently on each surface.
+
+With the model, `friction_needed` is logged too -- the friction a foot would
+need if its leg pushed like a strut from hip to foot. Servo-held legs are not
+struts, so it is a hypothesis: multi-surface runs will show whether poses
+with a high value are the ones that slide on smooth floors.
 
 ## Run it
 
