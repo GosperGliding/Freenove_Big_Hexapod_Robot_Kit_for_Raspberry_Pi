@@ -26,8 +26,7 @@ A candidate is three angles, each an offset from the legs-straight pose that
 Every leg gets the same three, with the hip mirrored on the left so the two
 sides are reflections rather than a twist. Servos are written directly: no IK,
 no foot coordinates, and no `point.txt` offsets, since the straight pose
-bypasses those too. The hand-written `--height 40` stance is
-`(0, −15.5, +84.9)`, inside the box.
+bypasses those too.
 
 Later stages relax the symmetry: per mirror pair, then per leg.
 
@@ -43,42 +42,46 @@ Every frame is checked before the first is sent: each servo within 5-175
 degrees, and no foot folded closer than 90 mm to its hip. A candidate that
 fails is logged as skipped and nothing moves.
 
-## What the score means
+## Two modes: measured only, or with the model
 
-```
-if the body does not follow the support check:  -150
-else:  reward = height − 3·level − 0.5·still
-```
+By default the robot starts from nothing: no model of its own geometry, no
+pose known to stand, and nothing carried over between runs. What stays built
+in is the safety cage -- servo travel, the fold check, the search box and the
+tip abort -- which stops it hurting itself and says nothing about where
+standing is. `--use-model` adds the robot's geometry, the same forward
+kinematics the simulator runs.
 
-| term | measured as | weight | role |
-|---|---|---|---|
-| height | mm the feet sit below the hips, from the commanded angles | 1 | pushes the pose upward |
-| level | degrees, accelerometer, against the robot lying straight-legged | 3 mm per degree | catches a lean |
-| still | deg/s, gyroscope, while settled | 0.5 mm per deg/s | says whether the tilt reading is valid |
+| | measured only (default) | `--use-model` |
+|---|---|---|
+| supported? | body pitches ≥ 1° when the knees are nudged | body pitches ≥ half what forward kinematics predicts |
+| reward if supported | 100 − 3·level − 0.5·still | height − 3·level − 0.5·still |
+| height | not known, not rewarded | from forward kinematics of the commanded angles |
+| noise check | first random pose that can be tried, 3 times | the hand-written stance, 3 times |
+| skipped as unreadable | — | poses predicted to pitch under 1.5° |
 
-The weights convert each measurement into millimetres so the terms add. They
-are exchange rates chosen by judgement; every trial logs the raw measurements,
-so rewards can be recomputed with other weights afterwards.
+Not supported scores −150, tipped −200, skipped −300 in both modes.
 
-Height comes from forward kinematics of the commanded angles -- the link
-lengths, used only to score. Nothing is commanded through it.
+**The support check.** The front knees go down and the rear knees up by 6
+degrees, and the accelerometer measures how far the body pitches. A body
+carried by its legs follows; one resting on its belly barely moves, because
+the floor is holding it. It matters most with the model: height is commanded,
+not measured, so a pose the servos cannot hold sags evenly onto the floor,
+still level and still, while height reports the full commanded value.
 
-**The support check.** Height is commanded, not measured. A pose the servos
-cannot hold sags until the body rests on the floor, and with every leg doing
-the same thing it sags evenly -- still level, still still, height reporting
-the full commanded value. So in the settled pose the front knees go down and
-the rear knees up by 6 degrees. Forward kinematics predicts how far that
-should pitch the body if the legs are carrying it; the accelerometer measures
-how far it did. A body on its legs follows; one resting on its belly barely
-moves. Under half the prediction and the trial scores as unsupported. Poses
-where the prediction is under 1.5 degrees are skipped, since there the check
-could not be told from noise. The thresholds are judgements; `support_ratio`
-is logged so real trials can set them.
+**What measured-only cannot do.** Nothing on the robot measures height, so
+every supported pose earns the same 100, less lean and wobble: the search
+learns which poses stand, not which stand tallest. It can also call a
+genuinely standing pose unsupported where the knee nudge happens to barely
+move the feet, which the model would have predicted and skipped. Both are the
+price of assuming nothing. A measured height -- the head's ultrasonic pointed
+at the floor, if it tilts that far -- would close the first gap.
 
-Expect the search to find the tallest pose the servos can hold. With every
-leg identical and six feet down, the body is centred over its feet by
-construction, so this stage mostly measures where the servos run out of
-strength -- and whether the harness can measure that reliably.
+The weights and thresholds are judgements; every trial logs the raw
+measurements (`support_measured_deg`, and `support_ratio` with the model), so
+they can be set from real runs and rewards recomputed afterwards.
+
+Not checked at this stage: whether the stance has margin to lift a foot. That
+matters for walking, not standing, and comes back with the walking stage.
 
 Not checked at this stage: whether the stance has margin to lift a foot. That
 matters for walking, not standing, and comes back with the walking stage.
@@ -88,13 +91,15 @@ matters for walking, not standing, and comes back with the walking stage.
 From this directory, Python server stopped (it holds BCM 4):
 
 ```bash
-python search.py --fake --trials 20     # no hardware; checks the loop only
-python search.py --trials 100           # on the robot, random search
+python search.py --fake --trials 20         # no hardware; checks the loop only
+python search.py --trials 100               # on the robot, measured only
+python search.py --trials 100 --use-model   # on the robot, with the model
 ```
 
-Trials take roughly 4 s, so 100 is under 10 minutes. Each run starts with three
-trials of the hand stance; if their spread exceeds 15 the harness warns,
-because a search cannot climb noise. With three parameters random search
+Trials take roughly 4 s, so 100 is under 10 minutes. Each run starts with
+three repeats of one pose; if their spread exceeds 15 the harness warns,
+because a search cannot climb noise. Every run draws a fresh seed and prints
+it; `--seed N` repeats a run's candidates exactly. With three parameters random search
 covers the box well; `--method cmaes` (`uv pip install cma`) matters more once
 the symmetry is relaxed.
 

@@ -14,8 +14,13 @@ What to look for on the first run is NOT good standing. It is:
 If the second is no, no optimiser can help -- fix the measurement first.
 
     python search.py --fake --trials 20        # no hardware, checks the loop
-    python search.py --trials 100              # on the robot
+    python search.py --trials 100              # on the robot, measured only
+    python search.py --trials 100 --use-model  # with the robot's geometry
     python search.py --method cmaes --trials 100
+
+Without --use-model the robot starts from nothing: no model of its geometry,
+no pose known to stand, nothing carried over from earlier runs. Only the
+safety cage is built in. See stand.py for what --use-model adds.
 """
 
 import argparse
@@ -52,9 +57,14 @@ def summary(reward, detail):
         return "%7.1f   skipped, %s" % (reward, detail["infeasible"])
     if "tipped" in detail:
         return "%7.1f   tipped while %s" % (reward, detail["tipped"])
-    line = "%7.1f   h %5.1f  level %5.2f  motion %5.2f  support %4.2f" % (
-        reward, detail["height_mm"], detail["level_deg"], detail["motion_dps"],
-        detail["support_ratio"])
+    line = "%7.1f   " % reward
+    if "height_mm" in detail:
+        line += "h %5.1f  " % detail["height_mm"]
+    line += "level %5.2f  motion %5.2f  " % (detail["level_deg"], detail["motion_dps"])
+    if "support_ratio" in detail:
+        line += "support %4.2f" % detail["support_ratio"]
+    else:
+        line += "pitched %4.2f deg" % detail["support_measured_deg"]
     if "unsupported" in detail:
         line += "  unsupported"
     return line
@@ -70,8 +80,14 @@ def main():
                         help="repeat an earlier run's candidates (default: a fresh seed each run)")
     parser.add_argument("--out", default="trials.jsonl")
     parser.add_argument("--repeats", type=int, default=3,
-                        help="runs of the hand stance first, to measure noise (0 skips)")
+                        help="runs of one pose first, to measure noise (0 skips)")
+    parser.add_argument("--use-model", action="store_true",
+                        help="score with the robot's geometry: forward-kinematics height, "
+                             "predicted support pitch, and the hand stance as the noise baseline")
     options = parser.parse_args()
+    use_model = options.use_model
+    print("mode: %s" % ("with the model (forward kinematics, hand-stance baseline)"
+                        if use_model else "measured only, nothing assumed beyond the safety cage"))
 
     if options.seed is None:
         options.seed = random.SystemRandom().randrange(1, 1000000)
@@ -99,9 +115,9 @@ def main():
 
         def run(candidate, label):
             nonlocal best, trial
-            reward, detail = stand.evaluate(robot, candidate, level_reference)
-            record = {"trial": trial, "seed": options.seed, "label": label,
-                      "reward": round(reward, 2),
+            reward, detail = stand.evaluate(robot, candidate, level_reference, use_model)
+            record = {"trial": trial, "seed": options.seed, "use_model": use_model,
+                      "label": label, "reward": round(reward, 2),
                       "candidate": [round(c, 1) for c in candidate]}
             record.update(detail)
             log_trial(log, record)
@@ -118,23 +134,40 @@ def main():
                 robot.relax()
                 input("  still on its side. Set it upright on its belly, then press Enter.")
                 robot.reenergise()
-            return reward
+            return reward, detail
+
+        def random_candidate():
+            return to_box([rng.random() for _ in stand.BOUNDS])
 
         try:
             # The same pose several times: if this spread is large, the search
-            # is climbing noise and no optimiser will help
-            rewards = [run(stand.HAND_STANCE, "hand") for _ in range(options.repeats)]
-            if rewards:
+            # is climbing noise and no optimiser will help. With the model the
+            # pose is the hand stance; without it, the first random pose that
+            # can be tried, so nothing known to stand is ever shown.
+            if options.repeats:
+                if use_model:
+                    pose, label = stand.HAND_STANCE, "hand"
+                else:
+                    pose, label = random_candidate(), "repeat"
+                    while stand.infeasible(robot, stand.joints(pose)):
+                        pose = random_candidate()
+                results = [run(pose, label) for _ in range(options.repeats)]
+                rewards = [r for r, _ in results]
+                pitches = [d["support_measured_deg"] for _, d in results
+                           if "support_measured_deg" in d]
                 spread = max(rewards) - min(rewards)
-                print("hand stance: mean %.1f, spread %.1f over %d runs"
+                print("repeated pose: reward mean %.1f, spread %.1f over %d runs"
                       % (sum(rewards) / len(rewards), spread, len(rewards)))
+                if pitches:
+                    print("  support pitch measured %.2f to %.2f deg"
+                          % (min(pitches), max(pitches)))
                 if spread > 15.0:
                     print("WARNING: that is a lot of noise to optimise through. Try a")
                     print("longer stand.SETTLE_SECONDS before trusting any result.")
 
             if options.method == "random":
                 for _ in range(options.trials):
-                    run(to_box([rng.random() for _ in stand.BOUNDS]), "search")
+                    run(random_candidate(), "search")
             else:
                 # Searched in the unit cube so one step size suits all three axes
                 optimiser = cma.CMAEvolutionStrategy(
@@ -143,7 +176,7 @@ def main():
                 done = 0
                 while done < options.trials and not optimiser.stop():
                     batch = optimiser.ask()[:options.trials - done]
-                    losses = [-run(to_box(unit), "search") for unit in batch]
+                    losses = [-run(to_box(unit), "search")[0] for unit in batch]
                     done += len(batch)
                     if len(batch) == optimiser.popsize:
                         optimiser.tell(batch, losses)

@@ -14,33 +14,40 @@ would swing all six legs the same way round, which twists the body. Knee and
 ankle need no flip here; Control's servo mapping already inverts them for the
 mirrored legs.
 
-The hand-written stance at `hexapod_walk --height 40` is (0, -15.5, +84.9) in
-this space, so the score it has to beat sits inside the search.
+Two modes: measured only, or with the model
+-------------------------------------------
+By default a trial is scored from measurements alone. Nothing about the robot
+is assumed beyond the safety cage -- the servo travel, the fold check, the
+search box and the tip abort, which stop it hurting itself and say nothing
+about where standing is. Standing means:
 
-What standing means numerically
--------------------------------
-  height   how far below the hips the feet are, from forward kinematics of
-           the commanded angles. Pushes the pose upward.
-  level    tilt of the settled pose against the robot lying straight-legged.
-  still    rotation rate while settled -- whether the tilt reading is valid.
+  supported  the knees of the front pair go down and the rear pair up, and
+             the body measurably pitches. One resting on its belly barely
+             moves, because the floor is holding it, not the legs.
+  level      tilt of the settled pose against the robot lying straight-legged.
+  still      rotation rate while settled.
 
-Height is commanded, not measured, and on its own that is a hole: a pose the
-servos cannot hold sags until the body rests on the floor, and because every
-leg does the same thing it sags evenly, so it still reads level and still
-while height reports the full commanded value.
+Nothing on the robot measures height, so in this mode taller is not rewarded:
+every supported pose earns the same base score, less its lean and wobble.
 
-So height only counts once the legs are shown to be carrying the body. In the
-settled pose the front pair of knees is lowered and the rear pair raised by a
-few degrees, which should pitch the body; forward kinematics says by how much
-if the legs are rigid and the feet stay planted. The accelerometer measures
-how far it actually pitched. A body on its legs follows; one resting on its
-belly barely moves, because the floor is holding it, not the legs.
+With use_model, the robot's geometry joins in -- forward kinematics from the
+link lengths, which is what the simulator runs too:
+
+  height     how far below the hips the feet are commanded to be, added to
+             the reward, so taller wins.
+  support    measured pitch compared against the pitch forward kinematics
+             predicts for rigid legs, rather than against a fixed threshold;
+             poses where the prediction is too small to see are skipped.
+
+The hand-written stance at `hexapod_walk --height 40`, (0, -15.5, +84.9) in
+this space, is only used as a baseline in that mode.
 """
 
 from robot import (STRAIGHT, TIP_ABORT_DEGREES, angle_between, floor_normal,
                    leg_geometry, tilt)
 
-# Search box, degrees from straight
+# Search box, degrees from straight. Part of the safety cage: the hip range is
+# what keeps the front and rear pairs from swinging into each other.
 BOUNDS = [
     (-20.0, 20.0),     # hip
     (-60.0, 45.0),     # knee
@@ -48,24 +55,27 @@ BOUNDS = [
 ]
 PARAMETER_NAMES = ["hip", "knee", "ankle"]
 
-# The hand-written stance at hexapod_walk --height 40
+# The hand-written stance at hexapod_walk --height 40; model mode only
 HAND_STANCE = [0.0, -15.5, 84.9]
 
 # The support check: knees of the front pair (legs 1, 6) down and the rear
-# pair (legs 3, 4) up by this much, and at least this share of the predicted
-# pitch must appear. Both are judgements; support_ratio is logged so real
-# trials can set them.
+# pair (legs 3, 4) up by this much.
 SUPPORT_KNEE_DEGREES = 6.0
-SUPPORT_MIN_RATIO = 0.5
-SUPPORT_MIN_PREDICTED_DEGREES = 1.5
 FRONT = (0, 5)
 REAR = (2, 3)
+# Measured only: the body must pitch at least this far. A judgement, set well
+# above the accelerometer's noise; support_measured_deg is logged to set it.
+SUPPORT_MIN_MEASURED_DEGREES = 1.0
+# With the model: this share of the predicted pitch must appear, and poses
+# predicted to pitch less than the minimum are skipped as unreadable.
+SUPPORT_MIN_RATIO = 0.5
+SUPPORT_MIN_PREDICTED_DEGREES = 1.5
 
-# Reward weights, in mm per unit of each measurement, so each weighted term
-# is in mm and they add. A 10 degree lean costs 30 mm of height; 20 deg/s of
-# wobble costs 10 mm.
+# Reward weights. With the model they are mm per unit, so each term is in mm
+# alongside height; measured only, they are points against STOOD_REWARD.
 LEVEL_COST_PER_DEGREE = 3.0
 MOTION_COST_PER_DEG_PER_SEC = 0.5
+STOOD_REWARD = 100.0
 
 # Below anything that stood: infeasible (nothing moved) < tipped < unsupported
 INFEASIBLE_REWARD = -300.0
@@ -98,11 +108,15 @@ def pitched(pose):
 
 
 def height(pose):
-    """The body height the lowest-reaching foot allows, mm."""
+    """The body height the lowest-reaching foot allows, mm. Model mode only."""
     return min(-leg_geometry(j)[2] for j in pose)
 
 
-def infeasible(robot, pose):
+def predicted_pitch(pose):
+    return angle_between(floor_normal(pose), floor_normal(pitched(pose)))
+
+
+def infeasible(robot, pose, use_model=False):
     """Why this pose cannot be tried, checked before anything moves."""
     straight = [STRAIGHT] * 6
     problem = robot.path_violation(pose, RAMP_FRAMES, start=straight)
@@ -111,18 +125,14 @@ def infeasible(robot, pose):
     problem = robot.path_violation(pitched(pose), TILT_FRAMES, start=pose)
     if problem:
         return "support check: " + problem
-    if predicted_pitch(pose) < SUPPORT_MIN_PREDICTED_DEGREES:
+    if use_model and predicted_pitch(pose) < SUPPORT_MIN_PREDICTED_DEGREES:
         # The knee change barely moves the feet vertically here, so whether
         # the body follows cannot be told from sensor noise
         return "support check would not show, %.2f degrees" % predicted_pitch(pose)
     return None
 
 
-def predicted_pitch(pose):
-    return angle_between(floor_normal(pose), floor_normal(pitched(pose)))
-
-
-def evaluate(robot, candidate, level_reference):
+def evaluate(robot, candidate, level_reference, use_model=False):
     """Run one trial. Returns (reward, detail dict).
 
     level_reference is the gravity vector measured with the robot lying
@@ -130,12 +140,13 @@ def evaluate(robot, candidate, level_reference):
     lean.
     """
     pose = joints(candidate)
-    problem = infeasible(robot, pose)
+    problem = infeasible(robot, pose, use_model)
     if problem:
         return INFEASIBLE_REWARD, {"infeasible": problem}
 
-    predicted = predicted_pitch(pose)
-    detail = {"height_mm": round(height(pose), 1)}
+    detail = {}
+    if use_model:
+        detail["height_mm"] = round(height(pose), 1)
     try:
         robot.ramp(pose, RAMP_FRAMES)
         robot.wait(SETTLE_SECONDS)
@@ -150,17 +161,25 @@ def evaluate(robot, candidate, level_reference):
         robot.wait(TILT_SETTLE_SECONDS)
         vector, _ = robot.sample(MEASURE_SECONDS / 2, MEASURE_SAMPLES // 2)
         robot.ramp(pose, TILT_FRAMES)
-        followed = angle_between(vector, base) / predicted
-        detail.update(support_predicted_deg=round(predicted, 2),
-                      support_ratio=round(followed, 2))
+        measured = angle_between(vector, base)
+        detail["support_measured_deg"] = round(measured, 2)
     finally:
         robot.ramp([STRAIGHT] * 6, RAMP_FRAMES)
 
-    if followed < SUPPORT_MIN_RATIO:
+    if use_model:
+        predicted = predicted_pitch(pose)
+        ratio = measured / predicted
+        detail.update(support_predicted_deg=round(predicted, 2),
+                      support_ratio=round(ratio, 2))
+        supported = ratio >= SUPPORT_MIN_RATIO
+    else:
+        supported = measured >= SUPPORT_MIN_MEASURED_DEGREES
+    if not supported:
         detail["unsupported"] = True
         return UNSUPPORTED_REWARD, detail
 
-    reward = (detail["height_mm"]
+    base_score = detail["height_mm"] if use_model else STOOD_REWARD
+    reward = (base_score
               - LEVEL_COST_PER_DEGREE * level
               - MOTION_COST_PER_DEG_PER_SEC * motion)
     return reward, detail
