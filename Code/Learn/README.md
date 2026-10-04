@@ -12,54 +12,76 @@ accelerometer cannot be integrated over a trial without drifting, the
 ultrasonic only sees forward, and the camera is dead. Standing is static, so
 the accelerometer measures orientation exactly and a trial takes seconds.
 
-## Stage 1: one foot position for every leg
+## Stage 1: three joint angles, shared by every leg
 
-Each leg gets the same `(x, y, z)` in its own leg frame, with `y` flipped on
-the left side -- a reflection across the centreline reverses the leg frame's
-`y`, which `Control.transform_coordinates` confirms. Three parameters. The
-hand-written stance at `hexapod_walk --height 40` is `(140, 0, -84)`, inside
-the search box, so the number to beat is measured on the same footing.
+A candidate is three angles, each an offset from the legs-straight pose that
+`servo.py` holds while the horns are fitted:
 
-Later stages relax this: 9 parameters with only left/right mirroring, then 18
-with none.
-
-## What the score means
-
-A stance you could walk from. After the pose settles, each foot is lifted
-30 mm in turn and the body's tilt is measured. Lifting a foot shrinks the
-support polygon, so the tilt it causes is a direct measure of how far inside
-the polygon the centre of mass sits.
-
-| term | from | role |
+| | range | |
 |---|---|---|
-| **lift** | accelerometer, worst of six lifts | defines standing |
-| height | the commanded `-z` | pushes the pose upward |
-| level | accelerometer, against the robot lying at rest | catches a lean |
-| still | gyroscope | says whether the tilt reading is valid |
+| hip | -20..+20 | swings the leg along the body |
+| knee | -60..+45 | raises (−) or lowers (+) the thigh |
+| ankle | 0..140 | bends the shin down from straight |
 
-Height alone is maximised by tucking the feet under the body: level, still,
-tall, and it falls over the moment a foot lifts. Lift is the only term that
-pushes back, and under symmetry it carries even more of the weight, because a
-symmetric pose that sags under load sags evenly and stays level.
+Every leg gets the same three, with the hip mirrored on the left so the two
+sides are reflections rather than a twist. Servos are written directly: no IK,
+no foot coordinates, and no `point.txt` offsets, since the straight pose
+bypasses those too. The hand-written `--height 40` stance is
+`(0, −15.5, +84.9)`, inside the box.
 
-All six legs are lifted, though symmetry says mirror pairs should agree. They
-only agree if the robot is mechanically symmetric, and it has never been
-calibrated. Each trial logs `mirror_gap_deg`, the difference between a leg's
-lift and its mirror's: large gaps mean the symmetric stage is fighting the
-hardware, and are the cue to calibrate or move to the 9-parameter stage.
+Later stages relax the symmetry: per mirror pair, then per leg.
 
 ## How a trial moves
 
-Every trial ramps out of Control's rest pose (feet at `140 0 0`, body on the
-floor) over 30 frames and ramps back at the end. Ramping keeps every servo
-inside its slew rate, so the robot is not dragged through poses nobody asked
-for and scored on the transition instead of the pose. Starting from the same
-pose each time makes trials independent of their order.
+Every trial starts with the legs straight, ramps to the candidate over 40
+frames in joint space, runs its measurements, and ramps back to straight.
+Ramping keeps every servo inside its slew rate, so the robot is not dragged
+through poses nobody asked for and scored on the transition. Starting from the
+same pose each time makes trials independent of their order.
 
-Every frame of every ramp and lift is checked before the first is sent: foot
-reach must stay within 90-225 mm and every servo within 15-165 degrees,
-calibration offsets included. A candidate that fails is logged as skipped and
-nothing moves.
+Every frame is checked before the first is sent: each servo within 5-175
+degrees, and no foot folded closer than 90 mm to its hip. A candidate that
+fails is logged as skipped and nothing moves.
+
+## What the score means
+
+```
+if the body does not follow the support check:  -150
+else:  reward = height − 3·level − 0.5·still
+```
+
+| term | measured as | weight | role |
+|---|---|---|---|
+| height | mm the feet sit below the hips, from the commanded angles | 1 | pushes the pose upward |
+| level | degrees, accelerometer, against the robot lying straight-legged | 3 mm per degree | catches a lean |
+| still | deg/s, gyroscope, while settled | 0.5 mm per deg/s | says whether the tilt reading is valid |
+
+The weights convert each measurement into millimetres so the terms add. They
+are exchange rates chosen by judgement; every trial logs the raw measurements,
+so rewards can be recomputed with other weights afterwards.
+
+Height comes from forward kinematics of the commanded angles -- the link
+lengths, used only to score. Nothing is commanded through it.
+
+**The support check.** Height is commanded, not measured. A pose the servos
+cannot hold sags until the body rests on the floor, and with every leg doing
+the same thing it sags evenly -- still level, still still, height reporting
+the full commanded value. So in the settled pose the front knees go down and
+the rear knees up by 6 degrees. Forward kinematics predicts how far that
+should pitch the body if the legs are carrying it; the accelerometer measures
+how far it did. A body on its legs follows; one resting on its belly barely
+moves. Under half the prediction and the trial scores as unsupported. Poses
+where the prediction is under 1.5 degrees are skipped, since there the check
+could not be told from noise. The thresholds are judgements; `support_ratio`
+is logged so real trials can set them.
+
+Expect the search to find the tallest pose the servos can hold. With every
+leg identical and six feet down, the body is centred over its feet by
+construction, so this stage mostly measures where the servos run out of
+strength -- and whether the harness can measure that reliably.
+
+Not checked at this stage: whether the stance has margin to lift a foot. That
+matters for walking, not standing, and comes back with the walking stage.
 
 ## Run it
 
@@ -70,18 +92,20 @@ python search.py --fake --trials 20     # no hardware; checks the loop only
 python search.py --trials 100           # on the robot, random search
 ```
 
-Trials take roughly 10 s, so 100 is under 20 minutes. Each starts with three
-runs of the hand stance; if their spread exceeds 15 the harness warns, because
-a search cannot climb noise. With three parameters random search covers the
-box well; `--method cmaes` (`uv pip install cma`) matters more at 9 and 18.
+Trials take roughly 4 s, so 100 is under 10 minutes. Each run starts with three
+trials of the hand stance; if their spread exceeds 15 the harness warns,
+because a search cannot climb noise. With three parameters random search
+covers the box well; `--method cmaes` (`uv pip install cma`) matters more once
+the symmetry is relaxed.
 
-`--fake` does not simulate physics. It exercises the loop, the feasibility
-checks and the logging, nothing more.
+`--fake` does not simulate physics. Its accelerometer reads the plane under
+the commanded feet, enough to exercise the loop, the checks and the logging.
 
 ## Safety
 
-- Constructing `Control` drives all 18 joints to rest immediately. Support
-  the body and keep the power switch in reach.
-- A tilt beyond 40 degrees aborts the trial and returns to rest. If the robot
-  is still over, servos relax and the harness waits for you.
+- Starting the harness energises the rail and drives all 18 joints to
+  straight at once, from wherever they are. Support the body and keep the
+  power switch in reach.
+- A tilt beyond 40 degrees aborts the trial and returns to straight. If the
+  robot is still over, servos relax and the harness waits for you.
 - Every trial is flushed to `trials.jsonl` as it finishes.

@@ -52,9 +52,12 @@ def summary(reward, detail):
         return "%7.1f   skipped, %s" % (reward, detail["infeasible"])
     if "tipped" in detail:
         return "%7.1f   tipped while %s" % (reward, detail["tipped"])
-    return "%7.1f   h %5.1f  lift %5.2f  level %5.2f  motion %5.2f  mirror gap %s" % (
-        reward, detail["height_mm"], detail["worst_lift_deg"], detail["level_deg"],
-        detail["motion_dps"], " ".join("%.1f" % g for g in detail["mirror_gap_deg"]))
+    line = "%7.1f   h %5.1f  level %5.2f  motion %5.2f  support %4.2f" % (
+        reward, detail["height_mm"], detail["level_deg"], detail["motion_dps"],
+        detail["support_ratio"])
+    if "unsupported" in detail:
+        line += "  unsupported"
+    return line
 
 
 def main():
@@ -82,7 +85,7 @@ def main():
     started = time.time()
 
     if not options.fake:
-        print("Control drives all 18 servos to the rest pose as soon as it starts.")
+        print("All 18 servos go straight to the legs-straight pose as soon as it starts.")
         print("Support the body; Ctrl-C to abort.")
         time.sleep(3.0)
 
@@ -98,7 +101,8 @@ def main():
             record.update(detail)
             log_trial(log, record)
             marker = ""
-            if label == "search" and (best is None or reward > best[0]):
+            if (label == "search" and "infeasible" not in detail
+                    and (best is None or reward > best[0])):
                 best = (reward, list(candidate))
                 marker = "  <- best"
             print("%-6s %4d  %s  %s%s" % (label, trial,
@@ -108,7 +112,7 @@ def main():
             if "tipped" in detail and needs_a_hand(robot, level_reference):
                 robot.relax()
                 input("  still on its side. Set it upright on its belly, then press Enter.")
-                robot.ramp(robot.positions)   # re-energise at rest
+                robot.reenergise()
             return reward
 
         try:
@@ -144,7 +148,8 @@ def main():
     elapsed = time.time() - started
     print("\n%d trials in %.0f s (%.1f s each)" % (trial, elapsed, elapsed / max(trial, 1)))
     if best is not None:
-        print("best reward %.1f at x %.1f  y %.1f  z %.1f" % ((best[0],) + tuple(best[1])))
+        print("best reward %.1f at hip %+.1f  knee %+.1f  ankle %+.1f degrees from straight"
+              % ((best[0],) + tuple(best[1])))
     print("log: %s" % options.out)
     return 0
 
