@@ -128,6 +128,9 @@ class FakeBackend:
     def read_gyro(self):
         return 0.0, 0.0, 0.0
 
+    def energise(self):
+        pass
+
     def relax(self):
         pass
 
@@ -140,16 +143,25 @@ class HardwareBackend:
 
     def __init__(self):
         from gpiozero import OutputDevice
-        from mpu6050 import mpu6050
+        # The class lives in the package's submodule. Importing it from there
+        # also works on installs whose __init__.py lost its re-export, which
+        # setup.py install produces under setuptools 80+.
+        from mpu6050.mpu6050 import mpu6050
         sys.path.insert(0, SERVER)
         from servo import Servo
 
-        self.power = OutputDevice(4)
-        self.power.off()          # active-high disable: low energises the rail
-        self.servo = Servo()
+        # The rail is held off until everything else is open, so a device
+        # that fails to start does so with no power on the servos. BCM 4 is an
+        # active-high disable, and gpiozero drives a new output low unless told
+        # otherwise -- which would energise the rail on this very line.
+        self.power = OutputDevice(4, initial_value=True)
         self.sensor = mpu6050(address=0x68, bus=1)
         self.sensor.set_accel_range(mpu6050.ACCEL_RANGE_2G)
         self.sensor.set_gyro_range(mpu6050.GYRO_RANGE_250DEG)
+        self.servo = Servo()
+
+    def energise(self):
+        self.power.off()          # low enables the rail
 
     def write(self, pose):
         for leg, joints in enumerate(pose):
@@ -183,7 +195,10 @@ class Robot:
         self.fake = fake
         self.backend = FakeBackend() if fake else HardwareBackend()
         self.pose = [STRAIGHT] * 6
+        # Pulses first, then power, so the servos wake up already commanded
+        # to straight rather than to whatever the PCA9685s last held
         self.backend.write(self.pose)
+        self.backend.energise()
 
     def __enter__(self):
         return self
